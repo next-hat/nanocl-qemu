@@ -1,16 +1,19 @@
 #!/bin/bash
 
-# If user is empty, use ubuntu
+# If user is empty, use cloud
 user=$USER
 if [ -z "$user" ]; then
-    user=ubuntu
+    user=cloud
 fi
 
-# If password is empty, use ubuntu
+# If password is empty, use cloud
 password=$PASSWORD
 if [ -z "$password" ]; then
-    password=ubuntu
+    password=cloud
 fi
+
+# Get host hostname
+hostname=$(hostname)
 
 # If gateway is not set, use the gateway of eth0
 if [ -z "$gateway" ]; then
@@ -25,7 +28,6 @@ if [ -z "$ip" ]; then
     ip=$(echo $ip | awk -F. '{print $1"."$2"."$3"."$4}')
 fi
 
-
 # Create bridge interface
 ip link add name br0 type bridge
 ip tuntap add dev tap0 mode tap user root
@@ -39,11 +41,23 @@ ip addr add $ip/16 dev br0
 ip route add default via $gateway dev br0
 ip link set tap0 up
 
+ssh_key=""
+
+if [ ! -z "$SSH_KEY" ]; then
+cat <<EOF > /tmp/ssh_key
+    ssh_authorized_keys:
+    - $SSH_KEY
+EOF
+ssh_key=`cat /tmp/ssh_key`
+cat /tmp/ssh_key
+fi
+
+
 ## Generate cloud-init config
 cat <<EOF > /tmp/user-data
 #cloud-config
 version: 2
-hostname: nanocl-dev
+hostname: $hostname
 manage_etc_hosts: true
 users:
   - name: $user
@@ -53,6 +67,7 @@ users:
     shell: /bin/bash
     lock_passwd: false
     chage: never
+$ssh_key
 
 ssh_pwauth: true
 disable_root: true
@@ -65,10 +80,11 @@ chpasswd:
 
 # packages:
 # - qemu-guest-agent
+# ssh_deletekeys: false
 
 runcmd:
   - netplan apply
-  - sh -c "sleep 10 && cloud-init clean" &
+  - sh -c "sleep 15 && cloud-init clean" &
 
 final_message: "The system is finally up, after \$UPTIME seconds"
 EOF
@@ -111,4 +127,4 @@ cat /tmp/network-config
 /usr/bin/cloud-localds /tmp/seed.img /tmp/user-data -N /tmp/network-config
 
 # Start quemu with tap0
-qemu-system-x86_64 -net nic,model=virtio -net tap,ifname=tap0,script=no,downscript=no -cdrom /tmp/seed.img $@
+/usr/bin/qemu-system-x86_64 -net nic,model=virtio -net tap,ifname=tap0,script=no,downscript=no -cdrom /tmp/seed.img $@

@@ -7,5 +7,8 @@ docker run -it --rm \
   --device=/dev/kvm \
   --device=/dev/net/tun \
   --cap-add NET_ADMIN \
-  -v $(pwd)/server.nanocl.img:/img/server.img \
+  -e SSH_KEY="$SSH_KEY" \
+  -e USER="$USER" \
+  -e PASSWORD="$PASSWORD" \
+  -v $(pwd)/server.img:/img/server.img \
   nanocl-qemu:test -accel kvm -m 4G -smp 4 -hda /img/server.img --nographic
