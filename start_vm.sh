@@ -11,4 +11,4 @@ docker run -it --rm \
   -e USER="$USER" \
   -e PASSWORD="$PASSWORD" \
   -v $(pwd)/server.img:/img/server.img \
-  nanocl-qemu:test -accel kvm -m 4G -smp 4 -hda /img/server.img --nographic
+  nanocl-qemu:latest -accel kvm -m 4G -smp 4 -hda /img/server.img --nographic

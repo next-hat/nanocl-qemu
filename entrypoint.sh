@@ -45,28 +45,34 @@ ssh_key=""
 
 if [ ! -z "$SSH_KEY" ]; then
 cat <<EOF > /tmp/ssh_key
-    ssh_authorized_keys:
-    - $SSH_KEY
+  ssh_authorized_keys:
+  - $SSH_KEY
 EOF
 ssh_key=`cat /tmp/ssh_key`
 cat /tmp/ssh_key
 fi
 
+delete_ssh_key=$DELETE_SSH_KEY
+if [ -z "$delete_ssh_key" ]; then
+    delete_ssh_key="true"
+fi
 
 ## Generate cloud-init config
 cat <<EOF > /tmp/user-data
 #cloud-config
+
 version: 2
 hostname: $hostname
 manage_etc_hosts: true
 users:
-  - name: $user
-    sudo: ALL=(ALL) NOPASSWD:ALL
-    groups: users, admin, sudoers
-    homedir: /home/$user
-    shell: /bin/bash
-    lock_passwd: false
-    chage: never
+- default
+- name: $user
+  primary_group: $user
+  sudo: ALL=(ALL) NOPASSWD:ALL
+  groups: users, admin, sudoers
+  homedir: /home/$user
+  shell: /bin/bash
+  lock_passwd: false
 $ssh_key
 
 ssh_pwauth: true
@@ -78,18 +84,14 @@ chpasswd:
       password: $password
       type: text
 
-# packages:
-# - qemu-guest-agent
-# ssh_deletekeys: false
+ssh_deletekeys: $delete_ssh_key
 
 runcmd:
   - netplan apply
-  - sh -c "sleep 15 && cloud-init clean" &
+  - sh -c "sleep 10 && cloud-init clean" &
 
 final_message: "The system is finally up, after \$UPTIME seconds"
 EOF
-
-cat /tmp/user-data
 
 from_network=$FROM_NETWORK
 if [ -z "$from_network" ]; then
@@ -103,6 +105,8 @@ fi
 
 # Generate network config
 cat <<EOF > /tmp/network-config
+#cloud-config
+
 network:
   version: 2
   renderer: networkd
@@ -121,10 +125,8 @@ network:
           addresses: [8.8.8.8, 8.8.4.4]
 EOF
 
-cat /tmp/network-config
-
 # Generate seed
 /usr/bin/cloud-localds /tmp/seed.img /tmp/user-data -N /tmp/network-config
 
 # Start quemu with tap0
-/usr/bin/qemu-system-x86_64 -net nic,model=virtio -net tap,ifname=tap0,script=no,downscript=no -cdrom /tmp/seed.img $@
+/usr/bin/qemu-system-x86_64 -net nic,model=virtio -net tap,ifname=tap0,script=no,downscript=no -cdrom /tmp/seed.img --no-graphic $@
