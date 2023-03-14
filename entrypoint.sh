@@ -129,4 +129,4 @@ EOF
 /usr/bin/cloud-localds /tmp/seed.img /tmp/user-data -N /tmp/network-config
 
 # Start quemu with tap0
-/usr/bin/qemu-system-x86_64 -net nic,model=virtio -net tap,ifname=tap0,script=no,downscript=no -cdrom /tmp/seed.img --no-graphic $@
+/usr/bin/qemu-system-x86_64 -net nic,model=virtio -net tap,ifname=tap0,script=no,downscript=no -cdrom /tmp/seed.img --nographic $@

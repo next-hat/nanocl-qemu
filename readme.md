@@ -30,6 +30,31 @@ Then you can start your container as a virtual machine using:
 
 ```sh
 docker run -it --rm \
+  --device=/dev/net/tun \
+  --cap-add NET_ADMIN \
+  -v $(pwd)/ubuntu-22.04-minimal-cloudimg-amd64.img:/img/server.img \
+  nexthat/nanocl-qemu:latest -m 4G -smp 4 -hda /img/server.img
+```
+
+Default user and password is set to `cloud:cloud`
+
+You can tweak some settings like the default user, the password and add ssh_key as follow
+
+```sh
+docker run -it --rm \
+  --device=/dev/net/tun \
+  --cap-add NET_ADMIN \
+  -e USER="$USER" \
+  -e SSH_KEY="$SSH_KEY" \
+  -e PASSWORD="$PASSWORD" \
+  -v $(pwd)/ubuntu-22.04-minimal-cloudimg-amd64.img:/img/server.img \
+  nexthat/nanocl-qemu:latest -m 4G -smp 4 -hda /img/server.img
+```
+
+If you want to enable kvm it's possible too:
+
+```sh
+docker run -it --rm \
   --device=/dev/kvm \
   --device=/dev/net/tun \
   --cap-add NET_ADMIN \
