@@ -88,7 +88,7 @@ ssh_deletekeys: $delete_ssh_key
 
 runcmd:
   - netplan apply
-  - sh -c "sleep 10 && cloud-init clean" &
+  - sh -c "sleep 2 && cloud-init clean" &
 
 final_message: "The system is finally up, after \$UPTIME seconds"
 EOF
@@ -130,3 +130,8 @@ EOF
 
 # Start quemu with tap0
 /usr/bin/qemu-system-x86_64 -net nic,model=virtio -net tap,ifname=tap0,script=no,downscript=no -cdrom /tmp/seed.img --nographic $@
+
+# Clean tap0
+ip link set tap0 down
+ip link del tap0
+ip link del br0
