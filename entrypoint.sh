@@ -15,7 +15,16 @@ fi
 # Get host hostname
 hostname=$(hostname)
 
-# If gateway is not set, use the gateway of eth0
+# Get default interface
+default_interface=$DEFAULT_INTERFACE
+
+if [ -z "$default_interface" ]; then
+    default_interface=$(ip route show | grep default | awk '{print $5}')
+fi
+
+gateway=$GATEWAY
+
+# If gateway is not set, use the default gateway
 if [ -z "$gateway" ]; then
     gateway=$(ip route show | grep default | awk '{print $3}')
     gateway=$(echo $gateway | awk -F. '{print $1"."$2"."$3"."$4}')
@@ -24,22 +33,42 @@ fi
 # If ip is not set, use the ip of eth0
 ip=$IP
 if [ -z "$ip" ]; then
-    ip=$(ip addr show eth0 | grep "inet " | awk '{print $2}' | cut -d/ -f1)
+    ip=$(ip addr show $default_interface | grep "inet " | awk '{print $2}' | cut -d/ -f1)
     ip=$(echo $ip | awk -F. '{print $1"."$2"."$3"."$4}')
 fi
 
-# Create bridge interface
-ip link add name br0 type bridge
-ip tuntap add dev tap0 mode tap user root
-ip link set dev tap0 master br0
-ip link set dev eth0 master br0
-ip link set br0 up
-# Remove ip from eth0 and add it to br0
-ip addr del $ip/16 dev eth0
-ip addr add $ip/16 dev br0
+# Change ip to local subnet of 10.x.0.x/16
+newip=$(echo $ip | awk -F. '{print "10."$2".0."$4}')
+newgateway=$(echo $gateway | awk -F. '{print "10."$2".0.1"}')
+rangestart=$(echo $gateway | awk -F. '{print "10."$2".0.2"}')
+rangeend=$(echo $gateway | awk -F. '{print "10."$2".0.254"}')
+
+echo $newip
+echo $newgateway
+
+# Generate random id for the network
+id=$(cat /dev/urandom | tr -dc 'a-z0-9' | fold -w 8 | head -n 1)
+
+echo $id
+
+TAP=tap$id
+BRIDGE=br$id
+
+# Setup bridge
+ip link add name $BRIDGE type bridge
+# ip tuntap add mode tap $TAP
+ip tuntap add dev $TAP mode tap user root
+# # Remove ip from eth0 and add it to br$id
+# ip addr flush dev eth0
+# ip addr del $ip/1 dev eth0
+ip link set dev $TAP master $BRIDGE
+# ip link set dev $default_interface master $BRIDGE
+ip addr add $newgateway/16 dev $BRIDGE
+# # Up interfaces
+ip link set $BRIDGE up
+ip link set $TAP up
 # Add new default route
-ip route add default via $gateway dev br0
-ip link set tap0 up
+# ip route add default via $gateway dev $BRIDGE
 
 ssh_key=""
 
@@ -115,11 +144,14 @@ network:
       match:
         name: $from_network
       set-name: $to_network
-      dhcp4: no
-      addresses: [$ip/16]
-      routes:
-      - to: default
-        via: $gateway
+      dhcp4: true
+      # addresses: [$newip/16]
+      # routes:
+      # - to: default
+      #   via: $newgateway
+      # - to: $newgateway/16
+      #   via: $newgateway
+      #   metric: 100
       nameservers:
           search: [Local]
           addresses: [8.8.8.8, 8.8.4.4]
@@ -128,10 +160,32 @@ EOF
 # Generate seed
 /usr/bin/cloud-localds /tmp/seed.img /tmp/user-data -N /tmp/network-config
 
-# Start quemu with tap0
-/usr/bin/qemu-system-x86_64 -net nic,model=virtio -net tap,ifname=tap0,script=no,downscript=no -cdrom /tmp/seed.img --nographic $@
+# Get eth0 mac address
+mac=$(ip link show eth0 | grep ether | awk '{print $2}')
 
-# Clean tap0
-ip link set tap0 down
-ip link del tap0
-ip link del br0
+cat <<EOF > /tmp/dnsmasq.conf
+bind-interfaces
+listen-address=$newgateway
+server=8.8.8.8
+server=8.8.4.4
+dhcp-range=$rangestart,$rangeend,12M
+dhcp-host=$mac,$newip
+EOF
+
+dnsmasq -d -C /tmp/dnsmasq.conf &
+
+# Redirect all incomming traffic to $newip and vice versa
+iptables -t nat -A PREROUTING -d $newip -j DNAT --to $ip
+iptables -t nat -A PREROUTING -d $ip -j DNAT --to $newip
+iptables -t nat -A POSTROUTING -s $ip -j SNAT --to $newip
+iptables -t nat -A POSTROUTING -s $newip -j SNAT --to $ip
+
+# Start quemu with tap$id
+/usr/bin/qemu-system-x86_64 -device virtio-net-pci,netdev=net0,mq=on,vectors=6,mac=$mac -netdev tap,script=no,downscript=no,ifname=$TAP,id=net0 -cdrom /tmp/seed.img --nographic $@
+
+# /usr/bin/qemu-system-x86_64 -net nic,model=virtio -net bridge,br=$BRIDGE -cdrom /tmp/seed.img -nographic $@
+
+# Clean network
+ip link set $TAP down
+ip link del $TAP
+ip link del $BRIDGE
