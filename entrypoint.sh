@@ -165,9 +165,12 @@ mac=$(ip link show eth0 | grep ether | awk '{print $2}')
 
 cat <<EOF > /tmp/dnsmasq.conf
 bind-interfaces
+no-hosts
+except-interface=lo
+no-resolv
 listen-address=$newgateway
-server=8.8.8.8
-server=8.8.4.4
+server=1.1.1.1
+server=1.0.0.1
 dhcp-range=$rangestart,$rangeend,12M
 dhcp-host=$mac,$newip
 EOF
