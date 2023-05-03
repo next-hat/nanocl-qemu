@@ -1,4 +1,4 @@
-name: Publish Image
+name: Release Image
 
 on:
   release:
@@ -14,8 +14,8 @@ jobs:
     steps:
       - name: Get info
         run: |
-          echo "CHANNEL=$(echo ${{ github.event.release.name }} | awk -F- '{print $1}')" >> $GITHUB_ENV
-          echo "VERSION=$(echo ${{ github.event.release.name }} | awk -F- '{print $2}')" >> $GITHUB_ENV
+          echo "VERSION=$(echo ${{ github.event.release.name }} | awk -F- '{print $1}')" >> $GITHUB_ENV
+          echo "CHANNEL=$(echo ${{ github.event.release.name }} | awk -F- '{print $2}')" >> $GITHUB_ENV
       - name: Print info
         run: |
           echo $CHANNEL
