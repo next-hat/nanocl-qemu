@@ -1,0 +1,51 @@
+name: Publish Image
+
+on:
+  release:
+    types: [published]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  release_image:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Get info
+        run: |
+          echo "CHANNEL=$(echo ${{ github.event.release.name }} | awk -F- '{print $1}')" >> $GITHUB_ENV
+          echo "VERSION=$(echo ${{ github.event.release.name }} | awk -F- '{print $2}')" >> $GITHUB_ENV
+      - name: Print info
+        run: |
+          echo $CHANNEL
+          echo $VERSION
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v2
+        with:
+          registry: ghcr.io
+          username: nexthatbot
+          password: ${{ secrets.BOT_TOKEN }}
+      - name: Publish Nightly
+        if: env.CHANNEL == 'nightly'
+        run: |
+          gh release download -R nxthat/nanocl-qemu $VERSION-nightly -p nanocl-qemu-$VERSION-nightly.tar.gz
+          cat nanocl-qemu-$VERSION-nightly.tar.gz | docker load
+          docker tag ghcr.io/nxthat/nanocl-qemu:$VERSION-nightly ghcr.io/nxthat/nanocl-qemu:nightly
+          docker tag ghcr.io/nxthat/nanocl-qemu:$VERSION-nightly ghcr.io/nxthat/nanocl-qemu:$VERSION-nightly
+          docker push ghcr.io/nxthat/nanocl-qemu:nightly
+          docker push ghcr.io/nxthat/nanocl-qemu:$VERSION-nightly
+        env:
+          GITHUB_TOKEN: ${{ secrets.BOT_TOKEN }}
+
+      - name: Publish Stable
+        if: env.CHANNEL != 'nightly'
+        run: |
+          gh release download -R nxthat/nanocl-qemu $VERSION -p nanocl-qemu-$VERSION.tar.gz
+          cat nanocl-qemu-$VERSION.tar.gz | docker load
+          docker tag ghcr.io/nxthat/nanocl-qemu:$VERSION ghcr.io/nxthat/nanocl-qemu:latest
+          docker tag ghcr.io/nxthat/nanocl-qemu:$VERSION ghcr.io/nxthat/nanocl-qemu:$VERSION
+          docker push ghcr.io/nxthat/nanocl-qemu:latest
+          docker push ghcr.io/nxthat/nanocl-qemu:$VERSION
+        env:
+          GITHUB_TOKEN: ${{ secrets.BOT_TOKEN }}
