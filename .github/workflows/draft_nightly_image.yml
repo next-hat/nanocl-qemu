@@ -50,18 +50,18 @@ jobs:
       - name: Test if release already exists
         id: release-exists
         continue-on-error: true
-        run: gh release view $VERSION-$CHANNEL
+        run: gh release view -R nxthat/nqemu $VERSION-$CHANNEL
         env:
           GITHUB_TOKEN: ${{ secrets.BOT_TOKEN }}
       - name: Create new draft release
         if: steps.release-exists.outcome == 'failure' && steps.release-exists.conclusion == 'success'
-        run: gh release create -t $VERSION-$CHANNEL -d $VERSION-$CHANNEL -F changelog.md /tmp/nqemu-$VERSION-$CHANNEL.tar.gz#nqemu-image;
+        run: gh release create -R nxthat/nqemu -t $VERSION-$CHANNEL -d $VERSION-$CHANNEL -F changelog.md /tmp/nqemu-$VERSION-$CHANNEL.tar.gz#nqemu-image;
         env:
           GITHUB_TOKEN: ${{ secrets.BOT_TOKEN }}
       - name: Update draft release
         if: steps.release-exists.outcome == 'success' && steps.release-exists.conclusion == 'success'
         run: |
-          gh release delete-asset -y nqemu-$VERSION-$CHANNEL nqemu-$VERSION-$CHANNEL.tar.gz || true
-          gh release upload nqemu-$VERSION-$CHANNEL /tmp/nqemu-$VERSION-$CHANNEL.tar.gz#nqemu-image
+          gh release delete-asset -R nxthat/nqemu -y nqemu-$VERSION-$CHANNEL nqemu-$VERSION-$CHANNEL.tar.gz || true
+          gh release upload -R nxthat/nqemu nqemu-$VERSION-$CHANNEL /tmp/nqemu-$VERSION-$CHANNEL.tar.gz#nqemu-image
         env:
           GITHUB_TOKEN: ${{ secrets.BOT_TOKEN }}
