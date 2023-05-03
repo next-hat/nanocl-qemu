@@ -42,26 +42,26 @@ jobs:
           echo $VERSION
       # Build daemon image
       - name: Build image
-        run: docker buildx build --load --cache-from type=local,src=/tmp/.buildx-cache --cache-to type=local,dest=/tmp/buildx-cache --build-arg channel=$CHANNEL -t ghcr.io/nxthat/nqemu:$VERSION-$CHANNEL -f ./Dockerfile .
+        run: docker buildx build --load --cache-from type=local,src=/tmp/.buildx-cache --cache-to type=local,dest=/tmp/buildx-cache --build-arg channel=$CHANNEL -t ghcr.io/nxthat/nanocl-qemu:$VERSION-$CHANNEL -f ./Dockerfile .
       # Export it as tar.gz
       - name: Export image
-        run: docker save ghcr.io/nxthat/nqemu:$VERSION-$CHANNEL | gzip > /tmp/nqemu-$VERSION-$CHANNEL.tar.gz
+        run: docker save ghcr.io/nxthat/nanocl-qemu:$VERSION-$CHANNEL | gzip > /tmp/nanocl-qemu-$VERSION-$CHANNEL.tar.gz
       # Upload it to release
       - name: Test if release already exists
         id: release-exists
         continue-on-error: true
-        run: gh release view -R nxthat/nqemu $VERSION-$CHANNEL
+        run: gh release view -R nxthat/nanocl-qemu $VERSION-$CHANNEL
         env:
           GITHUB_TOKEN: ${{ secrets.BOT_TOKEN }}
       - name: Create new draft release
         if: steps.release-exists.outcome == 'failure' && steps.release-exists.conclusion == 'success'
-        run: gh release create -R nxthat/nqemu -t $VERSION-$CHANNEL -d $VERSION-$CHANNEL -F changelog.md /tmp/nqemu-$VERSION-$CHANNEL.tar.gz#nqemu-image;
+        run: gh release create -R nxthat/nanocl-qemu -t $VERSION-$CHANNEL -d $VERSION-$CHANNEL -F changelog.md /tmp/nanocl-qemu-$VERSION-$CHANNEL.tar.gz#nanocl-qemu-image;
         env:
           GITHUB_TOKEN: ${{ secrets.BOT_TOKEN }}
       - name: Update draft release
         if: steps.release-exists.outcome == 'success' && steps.release-exists.conclusion == 'success'
         run: |
-          gh release delete-asset -R nxthat/nqemu -y nqemu-$VERSION-$CHANNEL nqemu-$VERSION-$CHANNEL.tar.gz || true
-          gh release upload -R nxthat/nqemu nqemu-$VERSION-$CHANNEL /tmp/nqemu-$VERSION-$CHANNEL.tar.gz#nqemu-image
+          gh release delete-asset -R nxthat/nanocl-qemu -y nanocl-qemu-$VERSION-$CHANNEL nanocl-qemu-$VERSION-$CHANNEL.tar.gz || true
+          gh release upload -R nxthat/nanocl-qemu nanocl-qemu-$VERSION-$CHANNEL /tmp/nanocl-qemu-$VERSION-$CHANNEL.tar.gz#nanocl-qemu-image
         env:
           GITHUB_TOKEN: ${{ secrets.BOT_TOKEN }}
