@@ -1,12 +1,17 @@
-FROM alpine:3.17
+FROM alpine:3.17.3
 
-RUN apk add --no-cache qemu-system-x86_64 iproute2 bash cloud-utils cdrkit
-RUN apk add --no-cache iptables dnsmasq
+RUN rm -rf /var/cache/apk/* && rm -rf /tmp/*
+RUN apk update && apk upgrade
+RUN apk add qemu-system-x86_64 iproute2 bash cloud-utils cdrkit
+RUN apk add iptables dnsmasq
 
 COPY ./cloud-localds /usr/bin/cloud-localds
 RUN chmod +x /usr/bin/cloud-localds
 
 COPY ./entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
+
+LABEL org.opencontainers.image.source https://github.com/nxthat/nqemu
+LABEL org.opencontainers.image.description Nanocl Qemu runtime
 
 ENTRYPOINT [ "/bin/sh", "entrypoint.sh" ]

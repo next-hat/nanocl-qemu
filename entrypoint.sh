@@ -167,7 +167,6 @@ cat <<EOF > /tmp/dnsmasq.conf
 bind-interfaces
 no-hosts
 except-interface=lo
-no-resolv
 listen-address=$newgateway
 server=1.1.1.1
 server=1.0.0.1
