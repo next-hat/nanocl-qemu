@@ -29,23 +29,23 @@ jobs:
       - name: Publish Nightly
         if: env.CHANNEL == 'nightly'
         run: |
-          gh release download -R nxthat/nqemu $VERSION-nightly -p nqemu-$VERSION-nightly.tar.gz
-          cat nqemu-$VERSION-nightly.tar.gz | docker load
-          docker tag ghcr.io/nxthat/nqemu:$VERSION-nightly ghcr.io/nxthat/nqemu:nightly
-          docker tag ghcr.io/nxthat/nqemu:$VERSION-nightly ghcr.io/nxthat/nqemu:$VERSION-nightly
-          docker push ghcr.io/nxthat/nqemu:nightly
-          docker push ghcr.io/nxthat/nqemu:$VERSION-nightly
+          gh release download -R nxthat/nanocl-qemu $VERSION-nightly -p nanocl-qemu-$VERSION-nightly.tar.gz
+          cat nanocl-qemu-$VERSION-nightly.tar.gz | docker load
+          docker tag ghcr.io/nxthat/nanocl-qemu:$VERSION-nightly ghcr.io/nxthat/nanocl-qemu:nightly
+          docker tag ghcr.io/nxthat/nanocl-qemu:$VERSION-nightly ghcr.io/nxthat/nanocl-qemu:$VERSION-nightly
+          docker push ghcr.io/nxthat/nanocl-qemu:nightly
+          docker push ghcr.io/nxthat/nanocl-qemu:$VERSION-nightly
         env:
           GITHUB_TOKEN: ${{ secrets.BOT_TOKEN }}
 
       - name: Publish Stable
         if: env.CHANNEL != 'nightly'
         run: |
-          gh release download -R nxthat/nqemu $VERSION -p nqemu-$VERSION.tar.gz
-          cat nqemu-$VERSION.tar.gz | docker load
-          docker tag ghcr.io/nxthat/nqemu:$VERSION ghcr.io/nxthat/nqemu:latest
-          docker tag ghcr.io/nxthat/nqemu:$VERSION ghcr.io/nxthat/nqemu:$VERSION
-          docker push ghcr.io/nxthat/nqemu:latest
-          docker push ghcr.io/nxthat/nqemu:$VERSION
+          gh release download -R nxthat/nanocl-qemu $VERSION -p nanocl-qemu-$VERSION.tar.gz
+          cat nanocl-qemu-$VERSION.tar.gz | docker load
+          docker tag ghcr.io/nxthat/nanocl-qemu:$VERSION ghcr.io/nxthat/nanocl-qemu:latest
+          docker tag ghcr.io/nxthat/nanocl-qemu:$VERSION ghcr.io/nxthat/nanocl-qemu:$VERSION
+          docker push ghcr.io/nxthat/nanocl-qemu:latest
+          docker push ghcr.io/nxthat/nanocl-qemu:$VERSION
         env:
           GITHUB_TOKEN: ${{ secrets.BOT_TOKEN }}
