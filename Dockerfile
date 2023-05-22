@@ -11,7 +11,7 @@ RUN chmod +x /usr/bin/cloud-localds
 COPY ./entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
-LABEL org.opencontainers.image.source https://github.com/nxthat/nqemu
-LABEL org.opencontainers.image.description Nanocl Qemu runtime
+LABEL org.opencontainers.image.source https://github.com/nxthat/nanocl-qemu
+LABEL org.opencontainers.image.description Nanocl Qemu Runtime
 
 ENTRYPOINT [ "/bin/sh", "entrypoint.sh" ]
