@@ -1,12 +1,12 @@
-name: Draft Nightly Image
+name: Draft Stable Image
 
 on:
   push:
     branches:
-      - "release-nightly-*"
+      - "release-stable-*"
   pull_request:
     branches:
-      - "release-nightly-*"
+      - "release-stable-*"
     types: [opened, synchronize, closed]
 
 env:
