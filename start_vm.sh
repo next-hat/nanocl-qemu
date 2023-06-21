@@ -5,7 +5,6 @@
 # -v $HOME/.Xauthority:/root/.Xauthority \
 docker run -it --rm \
   --device=/dev/kvm \
-  --device=/dev/net/tun \
   --cap-add NET_ADMIN \
   -e SSH_KEY="$SSH_KEY" \
   -e USER="$USER" \

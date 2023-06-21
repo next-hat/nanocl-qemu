@@ -1,9 +1,14 @@
-FROM alpine:3.17.3
+FROM alpine:3.18.2
 
-RUN rm -rf /var/cache/apk/* && rm -rf /tmp/*
-RUN apk update && apk upgrade
-RUN apk add qemu-system-x86_64 iproute2 bash cloud-utils cdrkit
-RUN apk add iptables dnsmasq
+RUN apk update \
+    && apk upgrade \
+    && apk add qemu-system-x86_64 \
+        iproute2 \
+        bash \
+        cloud-utils \
+        cdrkit \
+        && rm -rf /var/cache/apk/* \
+        && rm -rf /tmp/*
 
 COPY ./cloud-localds /usr/bin/cloud-localds
 RUN chmod +x /usr/bin/cloud-localds
