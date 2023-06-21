@@ -1,5 +1,15 @@
 #!/bin/bash
 
+# Get host hostname
+hostname=$(hostname)
+
+# Get default interface
+default_interface=$DEFAULT_INTERFACE
+
+if [ -z "$default_interface" ]; then
+    default_interface=$(ip route show | grep default | awk '{print $5}')
+fi
+
 # If user is empty, use cloud
 user=$USER
 if [ -z "$user" ]; then
@@ -12,8 +22,6 @@ if [ -z "$password" ]; then
     password=cloud
 fi
 
-# Get host hostname
-hostname=$(hostname)
 # If gateway is not set, use the gateway of eth0
 if [ -z "$gateway" ]; then
     gateway=$(ip route show | grep default | awk '{print $3}')
@@ -23,7 +31,7 @@ fi
 # If ip is not set, use the ip of eth0
 ip=$IP
 if [ -z "$ip" ]; then
-    ip=$(ip addr show eth0 | grep "inet " | awk '{print $2}' | cut -d/ -f1)
+    ip=$(ip addr show $default_interface | grep "inet " | awk '{print $2}' | cut -d/ -f1)
     ip=$(echo $ip | awk -F. '{print $1"."$2"."$3"."$4}')
 fi
 
@@ -48,7 +56,7 @@ ip tuntap add dev $TAP mode tap user root
 ip link set $TAP up
 ip link add name $BRIDGE type bridge
 ip link set dev $TAP master $BRIDGE
-ip link set dev eth0 master $BRIDGE
+ip link set dev $default_interface master $BRIDGE
 ip link set $BRIDGE up
 
 # Load ssh key if set
