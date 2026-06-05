@@ -149,10 +149,99 @@ EOF
 # Generate seed
 /usr/bin/cloud-localds /tmp/seed.img /tmp/user-data -N /tmp/network-config
 
+graphic_mode=false
+if [ "$GRAPHIC" = "true" ] || [ "$GRAPHIC" = "1" ]; then
+  graphic_mode=true
+fi
+
+spice_mode=false
+if [ "$SPICE" = "true" ] || [ "$SPICE" = "1" ]; then
+  spice_mode=true
+fi
+
+websockify_mode=false
+if [ "$WEBSOCKIFY" = "true" ] || [ "$WEBSOCKIFY" = "1" ]; then
+  websockify_mode=true
+fi
+
+qemu_args=("$@")
+qemu_display_args=()
+graphic_backend=${GRAPHIC_BACKEND:-auto}
+
+if [ "$graphic_mode" = "true" ] && [ -n "$DISPLAY" ]; then
+  available_displays=$(/usr/bin/qemu-system-x86_64 -display help 2>&1 || true)
+
+  if [ "$graphic_backend" = "gtk" ]; then
+    if echo "$available_displays" | grep -q '^gtk$'; then
+      qemu_display_args+=("-display" "gtk")
+    else
+      echo "GRAPHIC_BACKEND=gtk was requested, but gtk is not available in the image" >&2
+      exit 1
+    fi
+  elif [ "$graphic_backend" = "sdl" ]; then
+    if echo "$available_displays" | grep -q '^sdl$'; then
+      qemu_display_args+=("-display" "sdl")
+    else
+      echo "GRAPHIC_BACKEND=sdl was requested, but sdl is not available in the image" >&2
+      exit 1
+    fi
+  elif [ "$graphic_backend" = "auto" ]; then
+    if echo "$available_displays" | grep -q '^gtk$'; then
+      qemu_display_args+=("-display" "gtk")
+    elif echo "$available_displays" | grep -q '^sdl$'; then
+      qemu_display_args+=("-display" "sdl")
+    else
+      echo "GRAPHIC=true was requested, but no graphical QEMU display backend is available in the image" >&2
+      exit 1
+    fi
+  else
+    echo "GRAPHIC_BACKEND must be one of: auto, gtk, sdl" >&2
+    exit 1
+  fi
+elif [ "$graphic_mode" = "true" ]; then
+  echo "GRAPHIC=true requires DISPLAY to be set in the container environment" >&2
+  exit 1
+elif [ "$spice_mode" = "true" ] || [ "$websockify_mode" = "true" ]; then
+  qemu_display_args+=("-display" "none")
+fi
+
+if [ "$spice_mode" = "true" ]; then
+  qemu_display_args+=("-spice" "port=${SPICE_PORT:-5930},disable-ticketing=on,addr=127.0.0.1")
+fi
+
+websockify_pid=""
+if [ "$websockify_mode" = "true" ]; then
+  if ! command -v websockify >/dev/null 2>&1; then
+    echo "websockify is not installed in the image" >&2
+    exit 1
+  fi
+
+  vnc_display=${VNC_DISPLAY:-0}
+  vnc_port=$((5900 + vnc_display))
+
+  qemu_display_args+=("-vnc" "127.0.0.1:${VNC_DISPLAY:-0}")
+  websockify "${WEBSOCKIFY_PORT:-6080}" "127.0.0.1:${vnc_port}" &
+  websockify_pid=$!
+fi
+
+if [ "$graphic_mode" = "false" ] && [ "$spice_mode" = "false" ] && [ "$websockify_mode" = "false" ]; then
+  qemu_display_args+=("-nographic")
+fi
+
 # Start quemu with $TAP
-/usr/bin/qemu-system-x86_64 -netdev tap,id=$NET,ifname=$TAP,script=no -device virtio-net-pci,netdev=$NET,mac=$mac -cdrom /tmp/seed.img --nographic $@
+cleanup() {
+  if [ -n "$websockify_pid" ]; then
+    kill "$websockify_pid" >/dev/null 2>&1 || true
+  fi
+
+  ip link set "$TAP" down >/dev/null 2>&1 || true
+  ip link del "$TAP" >/dev/null 2>&1 || true
+  ip link del "$BRIDGE" >/dev/null 2>&1 || true
+}
+
+trap cleanup EXIT INT TERM
+
+/usr/bin/qemu-system-x86_64 -netdev tap,id=$NET,ifname=$TAP,script=no -device virtio-net-pci,netdev=$NET,mac=$mac -cdrom /tmp/seed.img "${qemu_display_args[@]}" "${qemu_args[@]}"
 
 # Clean networks
-ip link set $TAP down
-ip link del $TAP
-ip link del $BRIDGE
+cleanup
