@@ -7,7 +7,11 @@ if [[ $VM_DIR != /* || $VM_DIR == *,* || ! -d $VM_DIR || -L $VM_DIR ]] || [[ $(s
   echo 'VM_DIR must be an existing absolute directory with mode 0700, without commas or a symlink' >&2
   exit 1
 fi
-args=(run -it --rm --network "${NETWORK:-bridge}" --device /dev/kvm --device /dev/net/tun --cap-add NET_ADMIN --sysctl net.ipv4.ip_forward=1)
+endpoint_sysctls='net.ipv4.conf.IFNAME.proxy_arp=1,net.ipv4.conf.IFNAME.arp_ignore=1,net.ipv4.conf.IFNAME.send_redirects=0,net.ipv4.conf.IFNAME.rp_filter=0,net.ipv4.conf.IFNAME.accept_local=1'
+# Docker's extended network syntax normalizes names; use its immutable ID so
+# an existing mixed-case network name continues to select the same network.
+network_id=$(docker network inspect --format '{{.Id}}' "${NETWORK:-bridge}")
+args=(run -it --rm --network "name=$network_id,\"driver-opt=com.docker.network.endpoint.sysctls=$endpoint_sysctls\"" --device /dev/kvm --device /dev/net/tun --cap-add NET_ADMIN --sysctl net.ipv4.ip_forward=1)
 args+=(--mount "type=bind,source=$VM_DIR,target=/run/nanocl-vm")
 for scope in all default; do
   for setting in proxy_arp=1 arp_ignore=1 send_redirects=0 rp_filter=0 accept_local=1; do
@@ -40,7 +44,7 @@ if [[ ${CLOUD_INIT:-true} == true || ${CLOUD_INIT:-true} == 1 ]]; then
     args+=(-e CLOUD_INIT_USER_DATA)
   fi
 fi
-for key in PASSWORD SSH_KEY INSTANCE_ID DNS DELETE_SSH_KEY NANOCL_MANAGED_RESOURCES; do
+for key in PASSWORD SSH_KEY INSTANCE_ID DNS DELETE_SSH_KEY NANOCL_MANAGED_RESOURCES FROM_NETWORK DEFAULT_INTERFACE; do
   [[ -z ${!key:-} ]] || args+=(-e "$key=${!key}")
 done
 args+=(-v "$DISK:/img/server.img" "${IMAGE:-nanocl-qemu:vm019-test}")

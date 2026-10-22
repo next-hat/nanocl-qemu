@@ -12,7 +12,7 @@ import { after, test } from 'node:test';
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const work = mkdtempSync(join(tmpdir(), 'nanocl-launcher-test-'));
 after(() => rmSync(work, { recursive: true, force: true }));
-writeFileSync(join(work, 'docker'), '#!/bin/bash\nif [[ ${TEST_USER_DATA_OUTPUT:-} ]]; then printf \'%s\' "$CLOUD_INIT_USER_DATA" >"$TEST_USER_DATA_OUTPUT"; fi\nprintf \'%s\\0\' "$@"\n', { mode: 0o700 });
+writeFileSync(join(work, 'docker'), '#!/bin/bash\nif [[ $1 == network && $2 == inspect ]]; then if [[ ${TEST_NETWORK_OUTPUT:-} ]]; then printf \'%s\' "${@: -1}" >"$TEST_NETWORK_OUTPUT"; fi; printf \'%064d\\n\' 1; exit 0; fi\nif [[ ${TEST_USER_DATA_OUTPUT:-} ]]; then printf \'%s\' "$CLOUD_INIT_USER_DATA" >"$TEST_USER_DATA_OUTPUT"; fi\nprintf \'%s\\0\' "$@"\n', { mode: 0o700 });
 const vmDirectory = join(work, 'vm');
 mkdirSync(vmDirectory, { mode: 0o700 });
 const env = { PATH: `${work}:/usr/bin:/bin`, MAC: '52:54:00:19:00:01', DISK: '/test/guest.qcow2', VM_DIR: vmDirectory };
@@ -35,6 +35,29 @@ test('launcher chooses the guest account independently of the host USER', () => 
     const args = dockerArgs(values);
     assert.deepEqual(args.filter(arg => arg.startsWith('USER=')), [`USER=${expected}`]);
     assert.equal(args[args.indexOf(`USER=${expected}`) - 1], '-e');
+  }
+});
+
+test('launcher explicitly configures endpoint sysctls and separates guest and uplink names', () => {
+  const output = join(work, 'network-name');
+  const args = dockerArgs({ NETWORK: 'VM-Network', TEST_NETWORK_OUTPUT: output, FROM_NETWORK: 'guest0', DEFAULT_INTERFACE: 'veth0' });
+  const network = args[args.indexOf('--network') + 1];
+  assert(network.startsWith(`name=${'0'.repeat(63)}1,"driver-opt=com.docker.network.endpoint.sysctls=`));
+  assert.equal(readFileSync(output, 'utf8'), 'VM-Network');
+  for (const setting of ['proxy_arp=1', 'arp_ignore=1', 'send_redirects=0', 'rp_filter=0', 'accept_local=1']) {
+    assert(network.includes(`net.ipv4.conf.IFNAME.${setting}`));
+  }
+  assert(network.endsWith('"'));
+  assert(args.includes('FROM_NETWORK=guest0'));
+  assert(args.includes('DEFAULT_INTERFACE=veth0'));
+});
+
+test('runtime validates the configured guest interface before namespace changes', () => {
+  for (const name of ['guest0', 'ens3', 'custom_name-1', 'a'.repeat(15)]) {
+    assert.match(run('entrypoint.sh', { FROM_NETWORK: name }).stderr, /NANOCL_NETWORK_MODE=bridge/);
+  }
+  for (const name of ['lo', 'a'.repeat(16), 'guest 0', 'guest:0', 'guest\n0']) {
+    assert.match(run('entrypoint.sh', { FROM_NETWORK: name }).stderr, /FROM_NETWORK must be/);
   }
 });
 

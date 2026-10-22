@@ -16,7 +16,7 @@ const image = process.env.RUNTIME_IMAGE ?? 'nanocl-qemu:vm019-test';
 const tools = process.env.TOOLS_IMAGE ?? 'nanocl-qemu:vm019-tools';
 const work = mkdtempSync(`${tmpdir()}/nanocl-vm-test-`);
 const prefix = basename(work);
-const network = `${prefix}-net`;
+const network = `${prefix}-net`.toLowerCase();
 const containers = new Set();
 let networkOwned = false;
 const run = (cmd, args, options = {}) => execFileSync(cmd, args, { encoding: 'utf8', timeout: 120000, ...options }).trim();
@@ -48,12 +48,14 @@ async function launch(id, cloudInit, fixedIp, disk = `${work}/guest${id}.qcow2`,
   const mac = `52:54:00:19:00:0${id}`;
   const vmDir = `${work}/vm${id}`;
   mkdirSync(vmDir, { recursive: true, mode: 0o700 });
-  const args = ['create', '--name', name, '--network', network, '--cpus', '0.75', '--cap-add', 'NET_ADMIN', '--device', '/dev/kvm', '--device', '/dev/net/tun', '--sysctl', 'net.ipv4.ip_forward=1'];
+  const endpointSysctls = Object.entries({ proxy_arp: 1, arp_ignore: 1, send_redirects: 0, rp_filter: 0, accept_local: 1 }).map(([key, value]) => `net.ipv4.conf.IFNAME.${key}=${value}`).join(',');
+  const args = ['create', '--name', name, '--network', `name=${network},"driver-opt=com.docker.network.endpoint.sysctls=${endpointSysctls}"`, '--cpus', '0.75', '--cap-add', 'NET_ADMIN', '--device', '/dev/kvm', '--device', '/dev/net/tun', '--sysctl', 'net.ipv4.ip_forward=1'];
   for (const scope of ['all', 'default']) for (const [key, value] of Object.entries({ proxy_arp: 1, arp_ignore: 1, send_redirects: 0, rp_filter: 0, accept_local: 1 })) args.push('--sysctl', `net.ipv4.conf.${scope}.${key}=${value}`);
   if (fixedIp) args.push('--ip', fixedIp);
   for (const env of [`MAC=${mac}`, 'NANOCL_NETWORK_MODE=bridge', `CLOUD_INIT=${cloudInit}`, `CONSOLE=${id === 1}`, `INSTANCE_ID=${name}`, `USER=${cloudInit && userData === undefined ? 'cloud' : 'ignored invalid user'}`, `SSH_KEY=${readFileSync(`${work}/key.pub`, 'utf8').trim()}`]) args.push('-e', env);
   if (userData !== undefined) args.push('-e', `CLOUD_INIT_USER_DATA=${userData}`, '-e', 'PASSWORD=ignored\ninvalid', '-e', 'DELETE_SSH_KEY=ignored');
   if (!cloudInit) args.push('-e', 'CLOUD_INIT_USER_DATA=ignored custom data');
+  if (id === 1) args.push('-e', 'FROM_NETWORK=guest0');
   if (id === 2) args.push('-e', `DNS=${process.env.TEST_DNS ?? '1.1.1.1'}`);
   const resources = id === 2 ? { Cpu: 1, Memory: 768, MaxCpu: 4, MaxMemory: 1024 } : undefined;
   if (resources) {
@@ -70,6 +72,7 @@ async function launch(id, cloudInit, fixedIp, disk = `${work}/guest${id}.qcow2`,
   const ip = docker('inspect', '-f', '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}', name);
   const vm = { name, ip, mac, vmDir, disk, resources, user: userData === undefined ? 'cloud' : 'provisioned' };
   await ready(vm);
+  if (id === 1) assert.equal(ssh(vm, 'cat /sys/class/net/guest0/address'), mac);
   const qemuArgs = docker('exec', name, 'sh', '-c', 'tr "\\0" "\\n" </proc/$(pidof qemu-system-x86_64)/cmdline').split('\n');
   assert.equal(qemuArgs[qemuArgs.indexOf('-chardev') + 1], 'stdio,id=nanocl-serial,signal=off', 'serial Ctrl-C must remain guest input');
   assert.equal(qemuArgs[qemuArgs.indexOf('-serial') + 1], 'chardev:nanocl-serial');

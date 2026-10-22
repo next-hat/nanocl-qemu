@@ -111,6 +111,7 @@ user-data owns the guest accounts when supplied and ignores this generated value
 | `NANOCL_NETWORK_MODE` | required | `bridge`, after confirming a dedicated Docker bridge namespace. |
 | `NANOCL_MANAGED_RESOURCES` | `false` | Load CPU/RAM allocation and hotplug limits from the private `resources.json` file on every start. |
 | `DEFAULT_INTERFACE` | discovered | Must match the sole default-route interface. |
+| `FROM_NETWORK` | `nanocl0` | Guest interface name in the managed DHCP seed; NanoCL passes `NetIface` when configured. |
 | `CLOUD_INIT` | `true` | Generate and attach a NoCloud seed for provisioning. |
 | `CLOUD_INIT_USER_DATA` | unset | Complete custom user-data, up to 65536 UTF-8 bytes; replaces generated user/password/SSH configuration, including when empty. |
 | `INSTANCE_ID` | MAC | Stable cloud-init instance identity; NanoCL passes the VM key. |
@@ -131,13 +132,17 @@ existing password/SSH fields.
 
 For manual Docker runs, pass `--sysctl net.ipv4.ip_forward=1` and, for **both**
 `all` and `default`, `net.ipv4.conf.<scope>.proxy_arp=1`, `arp_ignore=1`,
-`send_redirects=0`, `rp_filter=0`, and `accept_local=1`. The runtime verifies these
+`send_redirects=0`, `rp_filter=0`, and `accept_local=1`. Also pass the same five
+interface settings through the endpoint's `com.docker.network.endpoint.sysctls`
+driver option, using `IFNAME` as the interface name. The launcher supplies this
+option so Docker applies it to the existing uplink. The runtime verifies these
 before changing addresses because Docker mounts `/proc/sys` read-only.
 
 ## Optional cloud-init and migration
 
 With `CLOUD_INIT=true`, the seed configures IPv4 DHCP matched by the stable MAC,
-with the interface named `nanocl0`. When `CLOUD_INIT_USER_DATA` is unset, it also
+with the interface named `nanocl0` unless `FROM_NETWORK` selects another valid
+name. When `CLOUD_INIT_USER_DATA` is unset, it also
 generates the hostname, user and SSH key/password configuration.
 The stable name prevents early netplan generation from waiting for a name that
 udev subsequently changes during boot. DHCPv6, router advertisements, and IPv6
@@ -178,7 +183,7 @@ provisioning, not a general guest configuration-management mechanism. Updating
 the data does not force once-per-instance cloud-init modules to run again on an
 already provisioned disk.
 
-Random MAC generation, `FROM_NETWORK`/`TO_NETWORK` renaming, arbitrary `IP`
+Random MAC generation, legacy `TO_NETWORK` renaming, arbitrary `IP`
 overrides, and the old public websockify path are removed. `IP`, when supplied,
 must equal the detected Docker address. `WEBSOCKIFY=true` and `SPICE=true` fail
 with an explicit migration error. Remove raw `-nographic`/`--nographic` and other

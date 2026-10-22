@@ -20,6 +20,8 @@ ipv4_number() {
 yaml_string() { local value=${1//\'/\'\'}; printf "'%s'" "$value"; }
 
 cloud_init=$(boolean CLOUD_INIT "${CLOUD_INIT:-true}")
+guest_interface=${FROM_NETWORK:-nanocl0}
+[[ $guest_interface =~ ^[a-zA-Z0-9_-]{1,15}$ && $guest_interface != lo ]] || fail 'FROM_NETWORK must be a non-loopback interface name of at most 15 characters'
 # Presence is intentional: an empty document also replaces generated defaults.
 custom_user_data=false
 if [[ $cloud_init == true && ${CLOUD_INIT_USER_DATA+x} ]]; then
@@ -229,7 +231,7 @@ ethernets:
   nanocl:
     match:
       macaddress: "$mac"
-    set-name: nanocl0
+    set-name: "$guest_interface"
     dhcp4: true
     dhcp6: false
     accept-ra: false
