@@ -65,7 +65,8 @@ The current Alpine 3.18 package build resolves QEMU 8.0.5 and dnsmasq 2.90. The
 candidate nightly tag is `ghcr.io/next-hat/nanocl-qemu:8.0.5.0-nightly`, with the
 `io.nanocl.vm-runtime-api=0.19` label. Custom user-data additionally requires
 `io.nanocl.vm-cloud-init-user-data=1`; managed QMP lifecycle requires
-`io.nanocl.vm-qmp=1`. Registry publication is a separate release step. NanoCL
+`io.nanocl.vm-qmp=1`; managed resource growth requires `io.nanocl.vm-resize=1`.
+Registry publication is a separate release step. NanoCL
 requires these capability labels so an old runtime cannot silently ignore the
 new configuration. After publication, CI can explicitly select this nightly
 image for end-to-end testing.
@@ -84,7 +85,8 @@ The launcher uses Docker's default bridge. Set `NETWORK` to a user-defined bridg
 for Docker service-name resolution. KVM requires `/dev/kvm`; runtime networking
 requires `/dev/net/tun` and `NET_ADMIN`. Privileged containers and host networking
 are unnecessary. The runtime owns network/display/monitor/supervision QEMU options;
-disk, memory, CPU and acceleration arguments remain configurable. In particular,
+disk and acceleration arguments remain configurable. CPU/memory arguments remain
+configurable when `NANOCL_MANAGED_RESOURCES` is disabled. In particular,
 `-no-shutdown`, `-action` and their double-dash aliases are rejected so guest
 poweroff stops the runtime instead of pausing QEMU.
 The `-qmp`, `-qmp-pretty`, `-monitor`, `-mon` and `-readconfig` options and their
@@ -107,6 +109,7 @@ user-data owns the guest accounts when supplied and ignores this generated value
 | --- | --- | --- |
 | `MAC` | required | Stable, nonzero, unicast guest MAC; owned and persisted by NanoCL. |
 | `NANOCL_NETWORK_MODE` | required | `bridge`, after confirming a dedicated Docker bridge namespace. |
+| `NANOCL_MANAGED_RESOURCES` | `false` | Load CPU/RAM allocation and hotplug limits from the private `resources.json` file on every start. |
 | `DEFAULT_INTERFACE` | discovered | Must match the sole default-route interface. |
 | `CLOUD_INIT` | `true` | Generate and attach a NoCloud seed for provisioning. |
 | `CLOUD_INIT_USER_DATA` | unset | Complete custom user-data, up to 65536 UTF-8 bytes; replaces generated user/password/SSH configuration, including when empty. |
@@ -239,12 +242,54 @@ in the guest's dirty page cache after cloud-init reports completion. The QMP
 shutdown test verifies that an acknowledged request leaves a paused guest alive,
 then resumes it and waits for ACPI shutdown with a buffered file write pending.
 It verifies that file and unchanged SSH hostkeys after starting again. This
-does not claim crash-safe guest application data. Live CPU/RAM/disk resizing is
-outside this lifecycle increment.
+does not claim crash-safe guest application data.
+
+## Managed resource growth
+
+NanoCL enables `NANOCL_MANAGED_RESOURCES=true` and writes
+`/run/nanocl-vm/resources.json` before creating the container. The file contains
+exactly four positive integer fields; memory values are MiB:
+
+```json
+{"Cpu":1,"Memory":768,"MaxCpu":4,"MaxMemory":1024}
+```
+
+The file must be a regular, non-symlink file with mode 0600 inside the private
+mode-0700 VM directory. The runtime bounds it to 4096 bytes, rejects duplicate
+or unknown fields, and parses JSON without executing its contents. Current
+allocations must not exceed their maxima. The default x86 PC machine supports
+at most 255 CPUs. Memory values must fit signed 64-bit bytes (at most
+8796093022207 MiB); the selected QEMU machine and available host memory impose
+additional practical limits.
+
+The runtime supplies a fixed socket/core/thread topology with `maxcpus` and,
+when RAM has headroom, 32 DIMM slots and `maxmem`. QEMU rejects memory slots when
+initial and maximum RAM are equal, so those options are omitted in that case.
+Raw `-smp`, `-m`, `-machine`, `-M`, `-device`, `-object`, `-numa`, `-global`
+and their double-dash aliases are rejected in managed mode so allocation and
+resource devices cannot override the managed configuration.
+Existing standalone invocation stays unchanged unless the flag
+is enabled; the launcher forwards it and then omits its default CPU/RAM flags.
+
+NanoCL can add CPUs and memory through the private QMP socket and grow the
+identified writable primary disk with `block_resize`. It verifies live QEMU
+state before atomically recording successful CPU/RAM allocations. On the next
+start of the same container, the runtime reads the updated file, folds added
+RAM into the base allocation and restores the available DIMM slots. Cleanup
+preserves this file. Disk capacity persists in the disk image itself. A caller
+must retain the original maxima; one memory DIMM per increase allows at most
+32 increases per boot. No resource shrinking is supported by this contract.
+
+Guest CPU/memory online state and disk partition/filesystem expansion are guest
+OS responsibilities. QMP hardware allocation alone does not establish that a
+guest has made the added resources usable. NanoCL's guest policy is documented
+with its resize API. Existing containers need one planned recreation to enable
+this managed startup contract and reserve larger maxima.
 
 ## Reproducible validation
 
-Run launcher and early runtime argument checks without Docker or KVM:
+Run launcher, JSON parser and early runtime argument checks with Node.js, Bash
+and `jq`, without Docker or KVM:
 
 ```sh
 node --test tests/launcher.mjs
@@ -260,7 +305,7 @@ node tests/integration.mjs /absolute/path/ubuntu-24.04-minimal-cloudimg-amd64.im
 ```
 
 The suite creates only uniquely named containers and a dedicated `/24` Docker
-network, with each of its two VM containers limited to one CPU. `TEST_SUBNET`
+network, with each VM limited to 0.75 CPU and each helper to 0.25 CPU. `TEST_SUBNET`
 overrides `172.29.222.0/24` if it conflicts with local networks. It uses qcow2
 overlays in a temporary directory, leaves the source disk
 read-only, and removes its containers/network in `finally`. Logs and overlays
@@ -276,7 +321,8 @@ boot, same-IP/mask/MAC, exact gateway/helper route/MTU, guest UDP/TCP DNS and
 outbound HTTP, SSH ingress, byte-preserved custom user-data with a custom SSH
 user, `write_files`, `runcmd`, retained instance identity and managed DHCP, explicit
 renewal with no uplink DHCP, two simultaneous VMs and guest-to-guest ingress,
-private Unix VNC protocol, private QMP negotiation/status/pause/resume, ACPI
+private Unix VNC protocol, private QMP negotiation/status/pause/resume, live CPU,
+RAM and IDE disk growth, allocation persistence across a same-container start, ACPI
 shutdown and restart with buffered writes and stable SSH hostkeys, DHCP-process
 failure, and cleanup
 of the TAP/owned rules while preserving Docker resolver rules. The

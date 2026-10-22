@@ -142,3 +142,82 @@ test('runtime rejects shutdown and monitor overrides before touching its namespa
   assert.notEqual(allowed.status, 0);
   assert.match(allowed.stderr, /NANOCL_NETWORK_MODE=bridge/);
 });
+
+test('managed resources reject raw CPU, memory and machine overrides; standalone retains them', () => {
+  for (const option of ['smp', 'm', 'machine', 'M', 'device', 'object', 'numa', 'global']) for (const flag of [`-${option}`, `--${option}`, `-${option}=1`, `--${option}=1`]) {
+    const rejected = run('entrypoint.sh', { NANOCL_MANAGED_RESOURCES: 'true' }, [flag, '1']);
+    assert.notEqual(rejected.status, 0);
+    assert.match(rejected.stderr, /conflicts with NanoCL-managed resources/);
+    const allowed = run('entrypoint.sh', {}, [flag, '1']);
+    assert.match(allowed.stderr, /NANOCL_NETWORK_MODE=bridge/);
+  }
+});
+
+test('launcher forwards managed resource mode and omits conflicting default allocations', () => {
+  for (const value of ['true', '1', 'false', '0']) {
+    const args = dockerArgs({ NANOCL_MANAGED_RESOURCES: value });
+    assert(args.includes(`NANOCL_MANAGED_RESOURCES=${value}`));
+    assert.equal(args.includes('-m'), value === 'false' || value === '0');
+    assert.equal(args.includes('-smp'), value === 'false' || value === '0');
+  }
+});
+
+function resourceArgs(path) {
+  return spawnSync('/bin/bash', ['-c', 'set -eu; fail() { echo "$*" >&2; exit 1; }; source "$1"; load_managed_resources "$2"; printf "%s\\0" "${qemu_resources[@]}"', 'test', join(root, 'resources.sh'), path], {
+    encoding: 'utf8', timeout: 5000,
+  });
+}
+const resourcesPath = join(vmDirectory, 'resources.json');
+const allocation = { Cpu: 1, Memory: 768, MaxCpu: 4, MaxMemory: 1024 };
+function writeResources(data) { writeFileSync(resourcesPath, typeof data === 'string' ? data : JSON.stringify(data), { mode: 0o600 }); }
+
+test('managed resources supply hotplug topology and reread changed allocations on restart', () => {
+  for (const [data, smp, memory] of [
+    [allocation, 'cpus=1,maxcpus=4,sockets=1,cores=4,threads=1', '768M,slots=32,maxmem=1024M'],
+    [{ ...allocation, Cpu: 2, Memory: 1024 }, 'cpus=2,maxcpus=4,sockets=1,cores=4,threads=1', '1024M'],
+    [{ Cpu: 255, MaxCpu: 255, Memory: 1, MaxMemory: 8796093022207 }, 'cpus=255,maxcpus=255,sockets=1,cores=255,threads=1', '1M,slots=32,maxmem=8796093022207M'],
+  ]) {
+    writeResources(data);
+    const result = resourceArgs(resourcesPath);
+    assert.equal(result.status, 0, result.stderr);
+    assert.deepEqual(result.stdout.split('\0').slice(0, -1), ['-smp', smp, '-m', memory]);
+    assert.equal(readFileSync(resourcesPath, 'utf8'), JSON.stringify(data), 'runtime must retain the durable resource file');
+  }
+});
+
+test('managed resource schema rejects ambiguous, invalid and oversized documents', () => {
+  for (const data of [
+    {}, { ...allocation, Other: 1 }, { ...allocation, Cpu: '1' }, { ...allocation, Cpu: 0 },
+    { ...allocation, Cpu: 5 }, { ...allocation, MaxCpu: 256 }, { ...allocation, Memory: 0 },
+    { ...allocation, Memory: -1 }, { ...allocation, Memory: 1.5 }, { ...allocation, Memory: 1025 },
+    { ...allocation, MaxMemory: 8796093022208 }, [allocation], 'null', '{} {}',
+    '{"Cpu":1,"Cpu":2,"Memory":768,"MaxCpu":4,"MaxMemory":1024}',
+    `${JSON.stringify(allocation)}\0`, `${JSON.stringify(allocation)}${' '.repeat(4096)}`,
+  ]) {
+    writeResources(data);
+    const result = resourceArgs(resourcesPath);
+    assert.notEqual(result.status, 0, JSON.stringify(data));
+    assert.match(result.stderr, /resources.json/);
+    assert.equal(result.stdout, '');
+  }
+  writeResources(`${JSON.stringify(allocation)}${' '.repeat(4096 - JSON.stringify(allocation).length)}`);
+  assert.equal(resourceArgs(resourcesPath).status, 0, '4096 bytes is accepted');
+});
+
+test('managed resource input refuses symlinks, non-regular files and non-private permissions', () => {
+  writeResources(allocation);
+  chmodSync(resourcesPath, 0o644);
+  assert.match(resourceArgs(resourcesPath).stderr, /0600/);
+  chmodSync(resourcesPath, 0o600);
+  const linked = join(vmDirectory, 'linked.json');
+  symlinkSync(resourcesPath, linked);
+  for (const path of [linked, vmDirectory, join(vmDirectory, 'absent')]) {
+    assert.notEqual(resourceArgs(path).status, 0);
+  }
+  chmodSync(vmDirectory, 0o755);
+  assert.match(resourceArgs(resourcesPath).stderr, /0700/);
+  chmodSync(vmDirectory, 0o700);
+  const linkedDirectory = join(work, 'linked-vm');
+  symlinkSync(vmDirectory, linkedDirectory);
+  assert.match(resourceArgs(join(linkedDirectory, 'resources.json')).stderr, /non-symlink directory/);
+});

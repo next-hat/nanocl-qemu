@@ -40,9 +40,15 @@ if [[ ${CLOUD_INIT:-true} == true || ${CLOUD_INIT:-true} == 1 ]]; then
     args+=(-e CLOUD_INIT_USER_DATA)
   fi
 fi
-for key in PASSWORD SSH_KEY INSTANCE_ID DNS DELETE_SSH_KEY; do
+for key in PASSWORD SSH_KEY INSTANCE_ID DNS DELETE_SSH_KEY NANOCL_MANAGED_RESOURCES; do
   [[ -z ${!key:-} ]] || args+=(-e "$key=${!key}")
 done
 args+=(-v "$DISK:/img/server.img" "${IMAGE:-nanocl-qemu:vm019-test}")
-if (($#)); then args+=("$@"); else args+=(-accel kvm -m 2G -smp 2 -drive "file=/img/server.img,if=virtio,format=qcow2"); fi
+if (($#)); then
+  args+=("$@")
+else
+  args+=(-accel kvm)
+  if [[ ${NANOCL_MANAGED_RESOURCES:-false} != true && ${NANOCL_MANAGED_RESOURCES:-false} != 1 ]]; then args+=(-m 2G -smp 2); fi
+  args+=(-drive "file=/img/server.img,if=virtio,format=qcow2")
+fi
 exec docker "${args[@]}"

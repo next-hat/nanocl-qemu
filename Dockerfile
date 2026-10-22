@@ -15,6 +15,7 @@ RUN apk update \
         iptables \
         dnsmasq \
         bash \
+        jq \
         cloud-utils \
         cdrkit \
         && rm -rf /var/cache/apk/* \
@@ -24,11 +25,13 @@ COPY ./cloud-localds /usr/bin/cloud-localds
 RUN chmod +x /usr/bin/cloud-localds
 
 COPY ./entrypoint.sh /entrypoint.sh
+COPY ./resources.sh /usr/lib/nanocl-qemu/resources.sh
 RUN chmod +x /entrypoint.sh
 
 LABEL io.nanocl.vm-runtime-api="0.19"
 LABEL io.nanocl.vm-cloud-init-user-data="1"
 LABEL io.nanocl.vm-qmp="1"
+LABEL io.nanocl.vm-resize="1"
 LABEL org.opencontainers.image.source=https://github.com/next-hat/nanocl-qemu
 LABEL org.opencontainers.image.description="Nanocl Qemu Runtime"
 

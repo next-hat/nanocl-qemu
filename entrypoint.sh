@@ -30,6 +30,7 @@ if [[ $cloud_init == true && ${CLOUD_INIT_USER_DATA+x} ]]; then
 fi
 console=$(boolean CONSOLE "${CONSOLE:-false}")
 graphic=$(boolean GRAPHIC "${GRAPHIC:-false}")
+managed_resources=$(boolean NANOCL_MANAGED_RESOURCES "${NANOCL_MANAGED_RESOURCES:-false}")
 [[ $(boolean WEBSOCKIFY "${WEBSOCKIFY:-false}") == false ]] || fail 'WEBSOCKIFY was removed; use the authorized NanoCL console with CONSOLE=true'
 [[ $(boolean SPICE "${SPICE:-false}") == false ]] || fail 'SPICE is not supported; use CONSOLE=true'
 [[ $console != true || $graphic != true ]] || fail 'CONSOLE and GRAPHIC are mutually exclusive'
@@ -39,13 +40,26 @@ mac=${mac,,}
 (( (16#${mac:0:2} & 1) == 0 )) || fail 'MAC must be a unicast address'
 [[ $mac != 00:00:00:00:00:00 ]] || fail 'MAC must be a nonzero unicast address'
 # The runtime owns network/display/monitor/process lifetime options. Other QEMU options
-# (disks, CPU, memory, acceleration) remain operator-controlled.
+# remain operator-controlled unless NanoCL manages CPU/memory allocations.
 for arg in "$@"; do
   case "$arg" in
     -nographic|--nographic|-vnc|--vnc|-display|--display|-spice|--spice|-net|--net|-netdev|--netdev|-nic|--nic|-daemonize|--daemonize|-no-shutdown|--no-shutdown|-action|--action|-serial|--serial|-monitor|--monitor|-mon|--mon|-qmp|--qmp|-qmp-pretty|--qmp-pretty|-readconfig|--readconfig|-pidfile|--pidfile)
       fail "$arg conflicts with runtime-managed networking, display, monitor or supervision";;
   esac
+  if [[ $managed_resources == true ]]; then
+    case "$arg" in
+      -smp|--smp|-smp=*|--smp=*|-m|--m|-m=*|--m=*|-machine|--machine|-machine=*|--machine=*|-M|--M|-M=*|--M=*|-device|--device|-device=*|--device=*|-object|--object|-object=*|--object=*|-numa|--numa|-numa=*|--numa=*|-global|--global|-global=*|--global=*)
+        fail "$arg conflicts with NanoCL-managed resources";;
+    esac
+  fi
  done
+vm_dir=/run/nanocl-vm
+qemu_resources=()
+if [[ $managed_resources == true ]]; then
+  # shellcheck source=resources.sh
+  source /usr/lib/nanocl-qemu/resources.sh
+  load_managed_resources "$vm_dir/resources.json"
+fi
 [[ ${NANOCL_NETWORK_MODE:-} == bridge ]] || fail 'NANOCL_NETWORK_MODE=bridge requires a dedicated Docker bridge network namespace'
 [[ -f /.dockerenv && $$ == 1 ]] || fail 'run the runtime as container PID 1 in a dedicated Docker namespace'
 
@@ -115,7 +129,6 @@ fi
 
 state=/run/nanocl-runtime
 tap=nanocl-tap
-vm_dir=/run/nanocl-vm
 qmp_socket=$vm_dir/qmp.sock
 console_socket=$vm_dir/console.sock
 qemu_pid='' dnsmasq_pid='' shutdown_pid=''
@@ -289,7 +302,7 @@ dnsmasq_pid=$!
   -monitor none -qmp "unix:$qmp_socket,server=on,wait=off" \
   -netdev "tap,id=nanocl,ifname=$tap,script=no,downscript=no" \
   -device "virtio-net-pci,netdev=nanocl,mac=$mac" \
-  "${seed_args[@]}" "${qemu_serial[@]}" "${qemu_display[@]}" "$@" <&0 &
+  "${seed_args[@]}" "${qemu_serial[@]}" "${qemu_display[@]}" "${qemu_resources[@]}" "$@" <&0 &
 qemu_pid=$!
 set +e
 wait -n -p exited_pid "$qemu_pid" "$dnsmasq_pid"
