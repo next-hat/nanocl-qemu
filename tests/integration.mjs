@@ -207,6 +207,7 @@ try {
   assert.notEqual(first.ip, second.ip);
   ssh(first, `python3 -c 'import socket; s=socket.create_connection(("${second.ip}",22),10); assert s.recv(64).startswith(b"SSH-")'`);
   assert(!docker('exec', second.name, 'ss', '-lnt').match(/:(5900|6080)\b/));
+  assert.equal(docker('exec', second.name, 'sh', '-c', 'test ! -e /run/nanocl-vm/console.sock && test ! -L /run/nanocl-vm/console.sock'), '');
   console.log('PASS two simultaneous VMs and guest-to-guest ingress; console disabled');
   const rfb = docker('run', '--rm', '--cpus', '0.25', '--network', 'none', '-v', `${first.vmDir}:/vm`, tools, 'sh', '-c', 'timeout 2 socat - UNIX-CONNECT:/vm/console.sock | head -c 12');
   assert.equal(rfb, 'RFB 003.008');
