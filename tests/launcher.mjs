@@ -23,6 +23,19 @@ function dockerArgs(values) {
   return result.stdout.split('\0').slice(0, -1);
 }
 
+test('launcher chooses the guest account independently of the host USER', () => {
+  for (const [values, expected] of [
+    [{}, 'cloud'],
+    [{ USER: 'alice' }, 'cloud'],
+    [{ USER: 'alice', GUEST_USER: '' }, 'cloud'],
+    [{ USER: 'alice', GUEST_USER: 'vmadmin' }, 'vmadmin'],
+  ]) {
+    const args = dockerArgs(values);
+    assert.deepEqual(args.filter(arg => arg.startsWith('USER=')), [`USER=${expected}`]);
+    assert.equal(args[args.indexOf(`USER=${expected}`) - 1], '-e');
+  }
+});
+
 test('launcher forwards explicit SSH host-key policy, including false and zero', () => {
   for (const value of ['true', 'false', '1', '0']) {
     const args = dockerArgs({ DELETE_SSH_KEY: value });

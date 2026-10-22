@@ -85,6 +85,13 @@ disk, memory, CPU and acceleration arguments remain configurable. In particular,
 `-no-shutdown`, `-action` and their double-dash aliases are rejected so guest
 poweroff stops the runtime instead of pausing QEMU.
 
+The standalone launcher uses `GUEST_USER` for the generated guest account,
+defaulting to `cloud` when unset or empty. For example, set `GUEST_USER=vmadmin`
+alongside `SSH_KEY` to provision that account. The launcher maps this value to
+the runtime's `USER` environment variable and ignores the host shell's `USER`.
+Direct Docker runs still use `USER`; NanoCL's `User` field is unchanged. Custom
+user-data owns the guest accounts when supplied and ignores this generated value.
+
 ## Configuration
 
 | Environment | Default | Meaning |

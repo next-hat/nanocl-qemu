@@ -8,7 +8,7 @@ for scope in all default; do
     args+=(--sysctl "net.ipv4.conf.$scope.$setting")
   done
 done
-args+=(-e "MAC=$MAC" -e NANOCL_NETWORK_MODE=bridge -e "CLOUD_INIT=${CLOUD_INIT:-true}" -e "CONSOLE=${CONSOLE:-false}")
+args+=(-e "MAC=$MAC" -e NANOCL_NETWORK_MODE=bridge -e "CLOUD_INIT=${CLOUD_INIT:-true}" -e "CONSOLE=${CONSOLE:-false}" -e "USER=${GUEST_USER:-cloud}")
 if [[ ${CLOUD_INIT:-true} == true || ${CLOUD_INIT:-true} == 1 ]]; then
   if [[ ${CLOUD_INIT_USER_DATA_FILE+x} ]]; then
     if [[ ${CLOUD_INIT_USER_DATA+x} || ! -f $CLOUD_INIT_USER_DATA_FILE || ! -r $CLOUD_INIT_USER_DATA_FILE ]]; then
@@ -34,7 +34,7 @@ if [[ ${CLOUD_INIT:-true} == true || ${CLOUD_INIT:-true} == 1 ]]; then
     args+=(-e CLOUD_INIT_USER_DATA)
   fi
 fi
-for key in USER PASSWORD SSH_KEY INSTANCE_ID DNS DELETE_SSH_KEY; do
+for key in PASSWORD SSH_KEY INSTANCE_ID DNS DELETE_SSH_KEY; do
   [[ -z ${!key:-} ]] || args+=(-e "$key=${!key}")
 done
 if [[ ${CONSOLE:-false} == true || ${CONSOLE:-false} == 1 ]]; then
