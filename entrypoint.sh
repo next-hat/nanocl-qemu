@@ -38,12 +38,12 @@ mac=${mac,,}
 [[ "$mac" =~ ^([0-9a-f]{2}:){5}[0-9a-f]{2}$ ]] || fail 'MAC is required and must be a stable unicast address'
 (( (16#${mac:0:2} & 1) == 0 )) || fail 'MAC must be a unicast address'
 [[ $mac != 00:00:00:00:00:00 ]] || fail 'MAC must be a nonzero unicast address'
-# The runtime owns network/display/process lifetime options. Other QEMU options
+# The runtime owns network/display/monitor/process lifetime options. Other QEMU options
 # (disks, CPU, memory, acceleration) remain operator-controlled.
 for arg in "$@"; do
   case "$arg" in
-    -nographic|--nographic|-vnc|--vnc|-display|--display|-spice|--spice|-net|--net|-netdev|--netdev|-nic|--nic|-daemonize|--daemonize|-no-shutdown|--no-shutdown|-action|--action|-serial|--serial|-monitor|--monitor|-pidfile|--pidfile)
-      fail "$arg conflicts with runtime-managed networking, display or supervision";;
+    -nographic|--nographic|-vnc|--vnc|-display|--display|-spice|--spice|-net|--net|-netdev|--netdev|-nic|--nic|-daemonize|--daemonize|-no-shutdown|--no-shutdown|-action|--action|-serial|--serial|-monitor|--monitor|-mon|--mon|-qmp|--qmp|-qmp-pretty|--qmp-pretty|-readconfig|--readconfig|-pidfile|--pidfile)
+      fail "$arg conflicts with runtime-managed networking, display, monitor or supervision";;
   esac
  done
 [[ ${NANOCL_NETWORK_MODE:-} == bridge ]] || fail 'NANOCL_NETWORK_MODE=bridge requires a dedicated Docker bridge network namespace'
@@ -115,17 +115,21 @@ fi
 
 state=/run/nanocl-runtime
 tap=nanocl-tap
-console_socket=/run/nanocl-console/console.sock
+vm_dir=/run/nanocl-vm
+qmp_socket=$vm_dir/qmp.sock
+console_socket=$vm_dir/console.sock
 qemu_pid='' dnsmasq_pid='' shutdown_pid=''
 network_owned=false
 firewall_owned=false
 console_owned=false
+qmp_owned=false
 # ShellCheck 0.9 does not follow the EXIT trap invocation.
 # shellcheck disable=SC2317
 cleanup() {
   local result=$?
   trap - EXIT TERM INT
-  # Stop both children and reap them; bound an unresponsive guest's shutdown.
+  # TERM is an explicit forced stop. NanoCL requests graceful shutdown over QMP.
+  # Stop both children and reap them; bound an unresponsive process's cleanup.
   for pid in "$qemu_pid" "$dnsmasq_pid"; do [[ -z $pid ]] || kill -TERM "$pid" 2>/dev/null || true; done
   if [[ -n $qemu_pid || -n $dnsmasq_pid ]]; then
     (sleep 8; for pid in "$qemu_pid" "$dnsmasq_pid"; do [[ -z $pid ]] || kill -KILL "$pid" 2>/dev/null || true; done) &
@@ -150,7 +154,8 @@ cleanup() {
     ip addr replace "$cidr" dev "$uplink" 2>/dev/null || true
     ip route replace "${original_default[@]}" 2>/dev/null || true
   fi
-  if [[ $console_owned == true && -S $console_socket ]]; then rm -f "$console_socket"; fi
+  if [[ $console_owned == true && ! -L $console_socket && -S $console_socket ]]; then rm -f "$console_socket"; fi
+  if [[ $qmp_owned == true && ! -L $qmp_socket && -S $qmp_socket ]]; then rm -f "$qmp_socket"; fi
   rm -f "$state/seed.img" "$state/user-data" "$state/meta-data" "$state/network-config" "$state/dnsmasq.conf" "$state/leases"
   exit "$result"
 }
@@ -161,7 +166,15 @@ trap cleanup EXIT
 trap 'exit 143' TERM
 trap 'exit 130' INT
 [[ ! -e $state/seed.img ]] || rm -f "$state/seed.img"
-qemu_display=(-display none -serial mon:stdio)
+[[ ! -L $vm_dir && ! -L $qmp_socket ]] || fail 'VM control path must not be a symlink'
+mkdir -p "$vm_dir"
+chmod 700 "$vm_dir"
+[[ ! -e $qmp_socket || -S $qmp_socket ]] || fail 'QMP path is not a socket'
+rm -f "$qmp_socket"
+qmp_owned=true
+# Keep Ctrl-C as a guest byte without restoring the HMP monitor multiplexer.
+qemu_serial=(-chardev "stdio,id=nanocl-serial,signal=off" -serial chardev:nanocl-serial)
+qemu_display=(-display none)
 if [[ $graphic == true ]]; then
   [[ -n ${DISPLAY:-} ]] || fail 'GRAPHIC=true requires DISPLAY'
   backend=${GRAPHIC_BACKEND:-auto}
@@ -171,12 +184,10 @@ if [[ $graphic == true ]]; then
   fi
   [[ $backend == gtk || $backend == sdl ]] || fail 'unknown graphics backend'
   grep -qx "$backend" <<<"$available" || fail 'requested graphics backend is unavailable'
-  qemu_display=(-display "$backend" -serial mon:stdio)
+  qemu_display=(-display "$backend")
 fi
 if [[ $console == true ]]; then
-  [[ ! -L /run/nanocl-console && ! -L $console_socket ]] || fail 'console path must not be a symlink'
-  mkdir -p /run/nanocl-console
-  chmod 700 /run/nanocl-console
+  [[ ! -L $console_socket ]] || fail 'console path must not be a symlink'
   [[ ! -e $console_socket || -S $console_socket ]] || fail 'console path is not a socket'
   rm -f "$console_socket"
   console_owned=true
@@ -275,9 +286,10 @@ dnsmasq --test --conf-file="$state/dnsmasq.conf"
 dnsmasq --keep-in-foreground --conf-file="$state/dnsmasq.conf" &
 dnsmasq_pid=$!
 /usr/bin/qemu-system-x86_64 \
+  -monitor none -qmp "unix:$qmp_socket,server=on,wait=off" \
   -netdev "tap,id=nanocl,ifname=$tap,script=no,downscript=no" \
   -device "virtio-net-pci,netdev=nanocl,mac=$mac" \
-  "${seed_args[@]}" "${qemu_display[@]}" "$@" <&0 &
+  "${seed_args[@]}" "${qemu_serial[@]}" "${qemu_display[@]}" "$@" <&0 &
 qemu_pid=$!
 set +e
 wait -n -p exited_pid "$qemu_pid" "$dnsmasq_pid"

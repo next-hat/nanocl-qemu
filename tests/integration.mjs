@@ -3,10 +3,11 @@
 // Usage: node tests/integration.mjs /absolute/ubuntu-24.04-minimal-cloudimg-amd64.img
 // RUNTIME_IMAGE and TOOLS_IMAGE select locally built candidates. Never publishes.
 import assert from 'node:assert/strict';
-import { execFileSync, spawnSync } from 'node:child_process';
+import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import { copyFileSync, mkdtempSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, resolve } from 'node:path';
+import { createInterface } from 'node:readline';
 import { setTimeout as delay } from 'node:timers/promises';
 
 const base = resolve(process.argv[2] ?? '');
@@ -41,23 +42,84 @@ async function ready(vm) {
 async function launch(id, cloudInit, fixedIp, disk = `${work}/guest${id}.qcow2`, userData) {
   const name = `${prefix}-${id}`;
   const mac = `52:54:00:19:00:0${id}`;
-  const consoleDir = `${work}/console${id}`;
-  mkdirSync(consoleDir, { recursive: true });
-  const args = ['create', '--name', name, '--network', network, '--cpus', '1.5', '--cap-add', 'NET_ADMIN', '--device', '/dev/kvm', '--device', '/dev/net/tun', '--sysctl', 'net.ipv4.ip_forward=1'];
+  const vmDir = `${work}/vm${id}`;
+  mkdirSync(vmDir, { recursive: true, mode: 0o700 });
+  const args = ['create', '--name', name, '--network', network, '--cpus', '1', '--cap-add', 'NET_ADMIN', '--device', '/dev/kvm', '--device', '/dev/net/tun', '--sysctl', 'net.ipv4.ip_forward=1'];
   for (const scope of ['all', 'default']) for (const [key, value] of Object.entries({ proxy_arp: 1, arp_ignore: 1, send_redirects: 0, rp_filter: 0, accept_local: 1 })) args.push('--sysctl', `net.ipv4.conf.${scope}.${key}=${value}`);
   if (fixedIp) args.push('--ip', fixedIp);
   for (const env of [`MAC=${mac}`, 'NANOCL_NETWORK_MODE=bridge', `CLOUD_INIT=${cloudInit}`, `CONSOLE=${id === 1}`, `INSTANCE_ID=${name}`, `USER=${cloudInit && userData === undefined ? 'cloud' : 'ignored invalid user'}`, `SSH_KEY=${readFileSync(`${work}/key.pub`, 'utf8').trim()}`]) args.push('-e', env);
   if (userData !== undefined) args.push('-e', `CLOUD_INIT_USER_DATA=${userData}`, '-e', 'PASSWORD=ignored\ninvalid', '-e', 'DELETE_SSH_KEY=ignored');
   if (!cloudInit) args.push('-e', 'CLOUD_INIT_USER_DATA=ignored custom data');
   if (id === 2) args.push('-e', `DNS=${process.env.TEST_DNS ?? '1.1.1.1'}`);
-  args.push('-v', `${base}:${base}:ro`, '-v', `${work}:${work}`, '-v', `${consoleDir}:/run/nanocl-console`, image, '-accel', 'kvm', '-m', '768M', '-smp', '1', '-drive', `file=${disk},if=virtio,format=qcow2`);
+  args.push('-v', `${base}:${base}:ro`, '-v', `${work}:${work}`, '-v', `${vmDir}:/run/nanocl-vm`, image, '-accel', 'kvm', '-m', '768M', '-smp', '1', '-drive', `file=${disk},if=virtio,format=qcow2`);
   docker(...args);
   containers.add(name);
   docker('start', name);
   const ip = docker('inspect', '-f', '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}', name);
-  const vm = { name, ip, mac, consoleDir, user: userData === undefined ? 'cloud' : 'provisioned' };
+  const vm = { name, ip, mac, vmDir, user: userData === undefined ? 'cloud' : 'provisioned' };
   await ready(vm);
+  const qemuArgs = docker('exec', name, 'sh', '-c', 'tr "\\0" "\\n" </proc/$(pidof qemu-system-x86_64)/cmdline').split('\n');
+  assert.equal(qemuArgs[qemuArgs.indexOf('-chardev') + 1], 'stdio,id=nanocl-serial,signal=off', 'serial Ctrl-C must remain guest input');
+  assert.equal(qemuArgs[qemuArgs.indexOf('-serial') + 1], 'chardev:nanocl-serial');
+  assert.equal(qemuArgs[qemuArgs.indexOf('-monitor') + 1], 'none', 'guest serial must not expose HMP');
   return vm;
+}
+// A local root helper opens the mode-0700 socket; QMP never gets a TCP listener.
+async function withQmp(vm, action) {
+  const name = `${vm.name}-qmp`;
+  // Separate Docker startup from the protocol deadline and register ownership
+  // before starting: a delayed container create must not escape cleanup.
+  docker('create', '--name', name, '--network', 'none', '--cpus', '1', '-v', `${vm.vmDir}:/vm`, tools, 'tail', '-f', '/dev/null');
+  containers.add(name);
+  docker('start', name);
+  assert.equal(docker('inspect', '-f', '{{.State.Running}}', name), 'true');
+  const child = spawn('docker', ['exec', '-i', name, 'socat', '-', 'UNIX-CONNECT:/vm/qmp.sock'], { stdio: ['pipe', 'pipe', 'pipe'] });
+  const pending = new Map();
+  const events = [];
+  let sequence = 0;
+  let stderr = '';
+  let closed;
+  const done = new Promise(resolve => child.once('close', resolve));
+  child.stderr.on('data', chunk => { stderr = (stderr + chunk).slice(-8192); });
+  const settle = (key, error, value) => { const entry = pending.get(key); if (!entry) return; pending.delete(key); clearTimeout(entry.timer); error ? entry.reject(error) : entry.resolve(value); };
+  const wait = key => new Promise((resolve, reject) => {
+    if (closed) { reject(closed); return; }
+    const timer = setTimeout(() => settle(key, new Error(`Timed out waiting for QMP ${key}: ${stderr}`)), 10000);
+    pending.set(key, { resolve, reject, timer });
+  });
+  const fail = error => { closed = error; for (const key of pending.keys()) settle(key, error); };
+  const greeting = wait('greeting');
+  child.once('error', fail);
+  child.stdin.on('error', fail);
+  child.once('close', code => fail(new Error(`QMP helper exited (${code}): ${stderr}`)));
+  const lines = createInterface({ input: child.stdout });
+  lines.on('line', line => {
+    try {
+      const message = JSON.parse(line);
+      if (message.QMP) settle('greeting', undefined, message.QMP);
+      else if (message.event) events.push(message);
+      else if ('id' in message) settle(message.id, message.error ? new Error(JSON.stringify(message.error)) : undefined, message.return);
+    } catch (error) { fail(error); }
+  });
+  const execute = async command => {
+    const id = ++sequence;
+    const response = wait(id);
+    child.stdin.write(`${JSON.stringify({ execute: command, id })}\n`);
+    return response;
+  };
+  try {
+    await greeting;
+    await execute('qmp_capabilities');
+    return await action(execute, events);
+  } finally {
+    child.stdin.end();
+    // Closing the transport ends socat, including after a failed assertion.
+    const removed = attempt('docker', ['rm', '-f', name]);
+    child.kill();
+    await done;
+    lines.close();
+    if (removed.status === 0) containers.delete(name);
+  }
 }
 function checkNetwork(vm) {
   const data = JSON.parse(ssh(vm, 'ip -j -4 addr show scope global'));
@@ -96,6 +158,7 @@ console.log(`Evidence/overlays: ${work}`);
 try {
   assert.equal(docker('image', 'inspect', '-f', '{{index .Config.Labels "io.nanocl.vm-runtime-api"}}', image), '0.19');
   assert.equal(docker('image', 'inspect', '-f', '{{index .Config.Labels "io.nanocl.vm-cloud-init-user-data"}}', image), '1');
+  assert.equal(docker('image', 'inspect', '-f', '{{index .Config.Labels "io.nanocl.vm-qmp"}}', image), '1');
   docker('run', '--rm', '--entrypoint', 'bash', image, '-n', '/entrypoint.sh');
   docker('run', '--rm', '--entrypoint', 'shellcheck', tools, '/entrypoint.sh');
   const invalid = attempt('docker', ['run', '--rm', '--network', 'none', '-e', 'MAC=ff:ff:ff:ff:ff:ff', image]);
@@ -125,18 +188,44 @@ try {
   ssh(first, `python3 -c 'import socket; s=socket.create_connection(("${second.ip}",22),10); assert s.recv(64).startswith(b"SSH-")'`);
   assert(!docker('exec', second.name, 'ss', '-lnt').match(/:(5900|6080)\b/));
   console.log('PASS two simultaneous VMs and guest-to-guest ingress; console disabled');
-  const rfb = docker('run', '--rm', '--network', 'none', '-v', `${first.consoleDir}:/console`, tools, 'sh', '-c', 'timeout 2 socat - UNIX-CONNECT:/console/console.sock | head -c 12');
+  const rfb = docker('run', '--rm', '--network', 'none', '-v', `${first.vmDir}:/vm`, tools, 'sh', '-c', 'timeout 2 socat - UNIX-CONNECT:/vm/console.sock | head -c 12');
   assert.equal(rfb, 'RFB 003.008');
   console.log('PASS private Unix VNC protocol; NanoCL authorized WebSocket/browser validation is separate');
+  for (const vm of [first, second]) {
+    assert.equal(docker('exec', vm.name, 'stat', '-c', '%a', '/run/nanocl-vm'), '700');
+    assert.equal(docker('exec', vm.name, 'stat', '-c', '%a', '/run/nanocl-vm/qmp.sock'), '700');
+    await withQmp(vm, async (execute, events) => {
+      assert.equal((await execute('query-status')).status, 'running');
+      await execute('stop');
+      assert.equal((await execute('query-status')).status, 'paused');
+      assert(events.some(event => event.event === 'STOP'));
+      await execute('cont');
+      assert.equal((await execute('query-status')).status, 'running');
+      assert(events.some(event => event.event === 'RESUME'));
+    });
+  }
+  console.log('PASS private QMP negotiation, status and pause/resume events with console enabled and disabled');
   const hostKeys = ssh(second, 'sha256sum /etc/ssh/ssh_host_*_key.pub');
-  // Docker restart terminates QEMU like a power cut. Complete guest writes
-  // explicitly: cloud-init completion does not flush guest dirty pages.
-  ssh(second, 'sudo sync');
-  docker('restart', '-t', '15', second.name);
+  // Intentionally leave this buffered; ACPI shutdown must flush it without sync.
+  ssh(second, "sudo sh -c 'printf qmp-clean-shutdown >/etc/nanocl-before-powerdown'");
+  await withQmp(second, async execute => {
+    // A paused guest cannot process ACPI. Acceptance alone must not be mistaken
+    // for shutdown completion or force the runtime to terminate the guest.
+    await execute('stop');
+    await execute('system_powerdown');
+    assert.equal((await execute('query-status')).status, 'paused');
+    assert.equal(docker('inspect', '-f', '{{.State.Running}}', second.name), 'true');
+    await execute('cont');
+  });
+  await until('QMP powerdown stops runtime', () => docker('inspect', '-f', '{{.State.Running}}', second.name) === 'false');
+  assert.equal(docker('inspect', '-f', '{{.State.ExitCode}}', second.name), '0');
+  assert.equal(docker('run', '--rm', '--network', 'none', '-v', `${second.vmDir}:/vm`, tools, 'sh', '-c', 'test ! -e /vm/qmp.sock && test ! -e /vm/console.sock'), '');
+  docker('start', second.name);
   await ready(second);
   assert.equal(ssh(second, 'sha256sum /etc/ssh/ssh_host_*_key.pub'), hostKeys);
+  assert.equal(ssh(second, 'cat /etc/nanocl-before-powerdown'), 'qmp-clean-shutdown');
   checkNetwork(second);
-  console.log('PASS container restart after guest sync preserves IP, MAC and SSH hostkeys');
+  console.log('PASS QMP powerdown acknowledgement leaves a paused guest alive; resume completes ACPI shutdown and preserves buffered writes, IP, MAC and SSH hostkeys across a new start');
   ssh(first, 'sudo apt-get purge -y cloud-init >/dev/null; test ! -e /usr/bin/cloud-init');
   const netplan = `network:\n  version: 2\n  ethernets:\n    guest:\n      match:\n        macaddress: ${first.mac}\n      set-name: nanocl0\n      dhcp4: true\n      dhcp6: false\n      accept-ra: false\n      link-local: []\n`;
   ssh(first, `printf '%s' '${netplan}' | sudo tee /etc/netplan/01-dhcp.yaml >/dev/null; sudo chmod 600 /etc/netplan/01-dhcp.yaml; sudo rm -f /etc/netplan/50-cloud-init.yaml; sudo poweroff`);
@@ -163,6 +252,7 @@ try {
   docker('exec', plain.name, 'sh', '-c', 'kill -TERM $(pidof dnsmasq)');
   await until('dnsmasq failure stops runtime', () => docker('inspect', '-f', '{{.State.Running}}', plain.name) === 'false');
   assert.notEqual(docker('inspect', '-f', '{{.State.ExitCode}}', plain.name), '0');
+  assert.equal(docker('run', '--rm', '--network', 'none', '-v', `${plain.vmDir}:/vm`, tools, 'sh', '-c', 'test ! -e /vm/qmp.sock && test ! -e /vm/console.sock'), '');
   assert(!docker('exec', observer, 'ip', 'link').includes('nanocl-tap'));
   assert(!docker('exec', observer, 'iptables-save').includes('NANOCL_VM_'));
   // Docker removes its endpoint/uplink after the primary container exits.

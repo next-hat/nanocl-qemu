@@ -1,9 +1,10 @@
 # nanocl-qemu
 
 QEMU runtime for NanoCL 0.19. The guest receives the **same IPv4 address as its
-Docker container** by DHCP. Cloud-init is optional. An optional console listens
-on a private Unix socket and is exposed through NanoCL's authorized WebSocket
-endpoint, suitable for noVNC.
+Docker container** by DHCP. Cloud-init is optional. QMP lifecycle control always
+listens on a private Unix socket. An optional VNC console shares its private VM
+directory and is exposed through NanoCL's authorized WebSocket endpoint,
+suitable for noVNC.
 
 ## Networking
 
@@ -63,27 +64,35 @@ docker build -t nanocl-qemu:vm019-test .
 The current Alpine 3.18 package build resolves QEMU 8.0.5 and dnsmasq 2.90. The
 candidate nightly tag is `ghcr.io/next-hat/nanocl-qemu:8.0.5.0-nightly`, with the
 `io.nanocl.vm-runtime-api=0.19` label. Custom user-data additionally requires
-`io.nanocl.vm-cloud-init-user-data=1`. Registry publication is a separate release
-step. NanoCL requires the label so an old runtime cannot silently ignore the new
-configuration. After publication, CI can explicitly select this nightly image
-for end-to-end testing.
+`io.nanocl.vm-cloud-init-user-data=1`; managed QMP lifecycle requires
+`io.nanocl.vm-qmp=1`. Registry publication is a separate release step. NanoCL
+requires these capability labels so an old runtime cannot silently ignore the
+new configuration. After publication, CI can explicitly select this nightly
+image for end-to-end testing.
 
 Use an existing disk with a DHCP-capable guest. Keep a separate copy or qcow2
 overlay for each VM; never open one writable disk from multiple QEMU processes.
 The included launcher supplies required namespace sysctls and devices:
 
 ```sh
+install -d -m 700 "$PWD/vm-runtime"
 MAC=52:54:00:00:00:01 IMAGE=nanocl-qemu:vm019-test \
-  DISK="$PWD/server.img" ./start_vm.sh
+  VM_DIR="$PWD/vm-runtime" DISK="$PWD/server.img" ./start_vm.sh
 ```
 
 The launcher uses Docker's default bridge. Set `NETWORK` to a user-defined bridge
 for Docker service-name resolution. KVM requires `/dev/kvm`; runtime networking
 requires `/dev/net/tun` and `NET_ADMIN`. Privileged containers and host networking
-are unnecessary. The runtime owns network/display/supervision QEMU options;
+are unnecessary. The runtime owns network/display/monitor/supervision QEMU options;
 disk, memory, CPU and acceleration arguments remain configurable. In particular,
 `-no-shutdown`, `-action` and their double-dash aliases are rejected so guest
 poweroff stops the runtime instead of pausing QEMU.
+The `-qmp`, `-qmp-pretty`, `-monitor`, `-mon` and `-readconfig` options and their
+double-dash aliases are also rejected: extra monitors or configuration-file
+overrides would bypass the managed control socket. Serial output uses an
+explicit `stdio` chardev with `signal=off`, so Ctrl-C is delivered to the guest
+instead of terminating QEMU. The HMP monitor escape previously available in
+`mon:stdio` is disabled for headless and graphical modes.
 
 The standalone launcher uses `GUEST_USER` for the generated guest account,
 defaulting to `cloud` when unset or empty. For example, set `GUEST_USER=vmadmin`
@@ -106,7 +115,7 @@ user-data owns the guest accounts when supplied and ignores this generated value
 | `SSH_KEY` | none | Single authorized public key for the generated user. Ignored with custom user-data. |
 | `DELETE_SSH_KEY` | `true` | Generated cloud-init SSH host-key generation policy. Ignored with custom user-data. |
 | `DNS` | container resolvers | Optional comma-separated IPv4 upstream DNS servers. Guest DNS remains the private forwarder. |
-| `CONSOLE` | `false` | Enable raw VNC on `/run/nanocl-console/console.sock`. |
+| `CONSOLE` | `false` | Enable raw VNC on `/run/nanocl-vm/console.sock`. |
 | `GRAPHIC` | `false` | Local GTK/SDL display, requiring `DISPLAY` and operator-provided display mounts. |
 | `GRAPHIC_BACKEND` | `auto` | Local display backend: `auto`, `gtk`, or `sdl`. |
 
@@ -140,7 +149,7 @@ using `CLOUD_INIT_USER_DATA_FILE`:
 
 ```sh
 MAC=52:54:00:00:00:01 CLOUD_INIT_USER_DATA_FILE="$PWD/user-data.yaml" \
-  DISK="$PWD/server.img" ./start_vm.sh
+  VM_DIR="$PWD/vm-runtime" DISK="$PWD/server.img" ./start_vm.sh
 ```
 
 The launcher accepts an empty file, preserves trailing newlines, rejects NUL
@@ -173,7 +182,15 @@ with an explicit migration error. Remove raw `-nographic`/`--nographic` and othe
 runtime-owned QEMU network/display options; the runtime selects headless output
 or the requested display. Default headless serial output remains in Docker logs.
 
-## Console and lifecycle
+## QMP, console and lifecycle
+
+The runtime always opens `/run/nanocl-vm/qmp.sock`, with mode 0700 inside a
+mode-0700 directory. NanoCL bind-mounts a private VM-specific directory beneath
+its configured state directory at `/run/nanocl-vm`, including when the console
+is disabled. It checks the current VM and runtime identity before issuing
+lifecycle commands. QMP is a privileged host control interface, distinct from
+the guest's serial/VNC console; never expose it through a public socket bridge.
+The runtime creates no TCP QMP listener and disables the HMP monitor.
 
 `CONSOLE=true` creates a raw QEMU VNC Unix socket in a directory with mode 0700.
 It creates no TCP VNC or WebSocket listener. NanoCL mounts a VM-specific directory
@@ -183,16 +200,18 @@ checking the current VM, runtime identity and enabled console. See NanoCL's
 browser usage. QEMU native WebSocket and websockify were rejected because either
 would add a listener and an additional authorization boundary to the runtime.
 
-For the standalone launcher, `CONSOLE=true` (or `1`) requires `CONSOLE_DIR` to
-name an existing absolute directory with mode 0700, dedicated to this VM. The
-path must not be a symlink or contain commas. The launcher bind-mounts it at
-`/run/nanocl-console`; connect an authorized local console bridge to
-`$CONSOLE_DIR/console.sock`. The launcher does not create a shared directory or
-start a network listener. For example, create a new private directory per VM:
+The standalone launcher always requires `VM_DIR` to name an existing absolute
+directory with mode 0700, dedicated to this VM. The path must not be a symlink
+or contain commas. This replaces the former console-only `CONSOLE_DIR` setting.
+The launcher bind-mounts it at `/run/nanocl-vm`; QMP is available at
+`$VM_DIR/qmp.sock`, and an authorized local console bridge can connect to
+`$VM_DIR/console.sock` when `CONSOLE=true` (or `1`). The sockets belong to the
+container's root user. The launcher does not create a shared directory or start
+a network listener. For example, create a new private directory per VM:
 
 ```sh
-install -d -m 700 "$PWD/vm-console"
-MAC=52:54:00:00:00:01 CONSOLE=true CONSOLE_DIR="$PWD/vm-console" \
+install -d -m 700 "$PWD/vm-runtime"
+MAC=52:54:00:00:00:01 CONSOLE=true VM_DIR="$PWD/vm-runtime" \
   DISK="$PWD/server.img" ./start_vm.sh
 ```
 
@@ -200,16 +219,28 @@ QEMU and dnsmasq are supervised together. A DHCP/DNS process exit stops the gues
 a QEMU exit stops dnsmasq. TERM/INT stop and reap both children, with a bounded
 fallback for an unresponsive process. Cleanup removes only owned firewall
 chains/TAP/socket/seed and restores the container's original address/default
-route. Docker deletion removes the dedicated network namespace. A new start
+route. SIGKILL cannot run this cleanup and can leave socket files until the next
+start, which validates and replaces stale sockets. Docker deletion removes the
+dedicated network namespace. A new start
 rebuilds the lease from Docker's current address and the persisted MAC; address
 changes on recreation remain Docker/NanoCL's IP allocation policy.
 
-Docker stop/restart terminates QEMU; it is a guest power cut, not an ACPI guest
-shutdown. Shut down from inside the guest before a planned stop when filesystem
-consistency matters. Newly provisioned files can still be in the guest's dirty
-page cache after cloud-init reports completion. The restart test explicitly
-runs guest `sync` and verifies unchanged SSH hostkeys across the restart; it
-does not claim crash-safe guest application data.
+Graceful shutdown uses QMP: read the greeting, negotiate `qmp_capabilities`, then
+send `system_powerdown`. Its successful response acknowledges the request;
+wait for the guest to shut down and the runtime to exit before restarting or
+replacing its disk. An unresponsive guest may ignore ACPI, so the caller must
+bound its wait and explicitly choose whether to force termination. QMP `stop`
+and `cont` pause/resume execution; pausing does not flush guest writes.
+
+Direct Docker stop/restart still terminates QEMU and is an explicit forced
+process stop, not an ACPI guest shutdown. There is no second shutdown grace
+period in the container's TERM handler. Newly provisioned files may still be
+in the guest's dirty page cache after cloud-init reports completion. The QMP
+shutdown test verifies that an acknowledged request leaves a paused guest alive,
+then resumes it and waits for ACPI shutdown with a buffered file write pending.
+It verifies that file and unchanged SSH hostkeys after starting again. This
+does not claim crash-safe guest application data. Live CPU/RAM/disk resizing is
+outside this lifecycle increment.
 
 ## Reproducible validation
 
@@ -229,8 +260,9 @@ node tests/integration.mjs /absolute/path/ubuntu-24.04-minimal-cloudimg-amd64.im
 ```
 
 The suite creates only uniquely named containers and a dedicated `/24` Docker
-network. `TEST_SUBNET` overrides `172.29.222.0/24` if it conflicts with local
-networks. It uses qcow2 overlays in a temporary directory, leaves the source disk
+network, with each of its two VM containers limited to one CPU. `TEST_SUBNET`
+overrides `172.29.222.0/24` if it conflicts with local networks. It uses qcow2
+overlays in a temporary directory, leaves the source disk
 read-only, and removes its containers/network in `finally`. Logs and overlays
 are retained at the printed temporary path for inspection.
 `guest-no-cloud-init.qcow2` is a flattened snapshot taken after clean shutdown,
@@ -244,7 +276,8 @@ boot, same-IP/mask/MAC, exact gateway/helper route/MTU, guest UDP/TCP DNS and
 outbound HTTP, SSH ingress, byte-preserved custom user-data with a custom SSH
 user, `write_files`, `runcmd`, retained instance identity and managed DHCP, explicit
 renewal with no uplink DHCP, two simultaneous VMs and guest-to-guest ingress,
-private Unix VNC protocol, container restart after guest `sync`, DHCP-process
+private Unix VNC protocol, private QMP negotiation/status/pause/resume, ACPI
+shutdown and restart with buffered writes and stable SSH hostkeys, DHCP-process
 failure, and cleanup
 of the TAP/owned rules while preserving Docker resolver rules. The
 second VM exercises explicit upstream DNS (`TEST_DNS`, default `1.1.1.1`). It also

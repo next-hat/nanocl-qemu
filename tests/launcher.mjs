@@ -13,7 +13,9 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const work = mkdtempSync(join(tmpdir(), 'nanocl-launcher-test-'));
 after(() => rmSync(work, { recursive: true, force: true }));
 writeFileSync(join(work, 'docker'), '#!/bin/bash\nif [[ ${TEST_USER_DATA_OUTPUT:-} ]]; then printf \'%s\' "$CLOUD_INIT_USER_DATA" >"$TEST_USER_DATA_OUTPUT"; fi\nprintf \'%s\\0\' "$@"\n', { mode: 0o700 });
-const env = { PATH: `${work}:/usr/bin:/bin`, MAC: '52:54:00:19:00:01', DISK: '/test/guest.qcow2' };
+const vmDirectory = join(work, 'vm');
+mkdirSync(vmDirectory, { mode: 0o700 });
+const env = { PATH: `${work}:/usr/bin:/bin`, MAC: '52:54:00:19:00:01', DISK: '/test/guest.qcow2', VM_DIR: vmDirectory };
 const run = (script, values = {}, args = []) => spawnSync('/bin/bash', [join(root, script), ...args], {
   env: { ...env, ...values }, encoding: 'utf8', timeout: 5000,
 });
@@ -94,19 +96,19 @@ test('runtime bounds custom user-data by bytes only when cloud-init is enabled',
   }
 });
 
-test('console enabled launcher binds the supplied private VM directory', () => {
-  const directory = join(work, 'private console');
+test('launcher always binds the private VM directory, including without a console', () => {
+  const directory = join(work, 'private vm');
   mkdirSync(directory, { mode: 0o700 });
-  for (const value of ['true', '1']) {
-    const args = dockerArgs({ CONSOLE: value, CONSOLE_DIR: directory });
+  for (const value of ['true', '1', 'false', '0']) {
+    const args = dockerArgs({ CONSOLE: value, VM_DIR: directory });
     const index = args.indexOf('--mount');
     assert(index > 0);
-    assert.equal(args[index + 1], `type=bind,source=${directory},target=/run/nanocl-console`);
+    assert.equal(args[index + 1], `type=bind,source=${directory},target=/run/nanocl-vm`);
+    assert.equal(args.filter(arg => arg === '--mount').length, 1);
   }
-  for (const value of ['false', '0']) assert(!dockerArgs({ CONSOLE: value }).includes('--mount'));
 });
 
-test('console launcher refuses absent, non-private, relative and symlink directories before Docker', () => {
+test('launcher refuses absent, non-private, relative and symlink VM directories before Docker', () => {
   const shared = join(work, 'shared');
   mkdirSync(shared);
   chmodSync(shared, 0o755);
@@ -114,19 +116,26 @@ test('console launcher refuses absent, non-private, relative and symlink directo
   mkdirSync(privateTarget, { mode: 0o700 });
   const link = join(work, 'linked');
   symlinkSync(privateTarget, link);
-  for (const directory of [undefined, join(work, 'missing'), 'relative', shared, link]) {
-    const result = run('start_vm.sh', { CONSOLE: 'true', ...(directory === undefined ? {} : { CONSOLE_DIR: directory }) });
+  for (const directory of [undefined, join(work, 'missing'), 'relative', shared, link, '/tmp/vm,other']) {
+    const result = run('start_vm.sh', { VM_DIR: directory });
     assert.notEqual(result.status, 0);
-    assert.match(result.stderr, /CONSOLE_DIR/);
+    assert.match(result.stderr, /VM_DIR/);
     assert.equal(result.stdout, '', 'Docker must not be invoked');
   }
 });
 
-test('runtime rejects shutdown lifecycle overrides before touching its namespace', () => {
-  for (const args of [['-no-shutdown'], ['--no-shutdown'], ['-action', 'shutdown=pause'], ['--action', 'shutdown=pause']]) {
+test('runtime rejects shutdown and monitor overrides before touching its namespace', () => {
+  for (const args of [
+    ['-no-shutdown'], ['--no-shutdown'], ['-action', 'shutdown=pause'], ['--action', 'shutdown=pause'],
+    ['-qmp', 'tcp:0.0.0.0:4444,server=on'], ['--qmp', 'stdio'],
+    ['-qmp-pretty', 'stdio'], ['--qmp-pretty', 'stdio'],
+    ['-mon', 'chardev=other'], ['--mon', 'chardev=other'],
+    ['-monitor', 'stdio'], ['--monitor', 'stdio'],
+    ['-readconfig', '/tmp/other.cfg'], ['--readconfig', '/tmp/other.cfg'],
+  ]) {
     const result = run('entrypoint.sh', {}, args);
     assert.notEqual(result.status, 0);
-    assert.match(result.stderr, /conflicts with runtime-managed networking, display or supervision/);
+    assert.match(result.stderr, /conflicts with runtime-managed networking, display, monitor or supervision/);
     assert(result.stderr.includes(args[0]));
   }
   const allowed = run('entrypoint.sh', {}, ['-m', '768M', '-smp', '1']);
