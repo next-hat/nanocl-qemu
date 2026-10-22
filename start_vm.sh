@@ -1,13 +1,17 @@
-# -e NO_AT_BRIDGE=1 \
-# -e DISPLAY=$DISPLAY \
-# -v $(pwd)/seed.img:/img/seed.img \
-# -v /tmp/.X11-unix:/tmp/.X11-unix \
-# -v $HOME/.Xauthority:/root/.Xauthority \
-docker run -it --rm \
-  --device=/dev/kvm \
-  --cap-add NET_ADMIN \
-  -e SSH_KEY="$SSH_KEY" \
-  -e USER="$USER" \
-  -e PASSWORD="$PASSWORD" \
-  -v $(pwd)/server.img:/img/server.img \
-  nanocl-qemu:latest -accel kvm -m 4G -smp 4 -hda /img/server.img
+#!/bin/bash
+set -euo pipefail
+: "${MAC:?Set a stable guest MAC, for example 52:54:00:00:00:01}"
+: "${DISK:=$PWD/server.img}"
+args=(run -it --rm --network "${NETWORK:-bridge}" --device /dev/kvm --device /dev/net/tun --cap-add NET_ADMIN --sysctl net.ipv4.ip_forward=1)
+for scope in all default; do
+  for setting in proxy_arp=1 arp_ignore=1 send_redirects=0 rp_filter=0 accept_local=1; do
+    args+=(--sysctl "net.ipv4.conf.$scope.$setting")
+  done
+done
+args+=(-e "MAC=$MAC" -e NANOCL_NETWORK_MODE=bridge -e "CLOUD_INIT=${CLOUD_INIT:-true}" -e "CONSOLE=${CONSOLE:-false}")
+for key in USER PASSWORD SSH_KEY INSTANCE_ID DNS; do
+  [[ -z ${!key:-} ]] || args+=(-e "$key=${!key}")
+done
+args+=(-v "$DISK:/img/server.img" "${IMAGE:-nanocl-qemu:vm019-test}")
+if (($#)); then args+=("$@"); else args+=(-accel kvm -m 2G -smp 2 -drive "file=/img/server.img,if=virtio,format=qcow2"); fi
+exec docker "${args[@]}"

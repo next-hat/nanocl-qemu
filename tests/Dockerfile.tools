@@ -1,0 +1,4 @@
+ARG RUNTIME_IMAGE=nanocl-qemu:vm019-test
+FROM ${RUNTIME_IMAGE}
+RUN apk add --no-cache bind-tools socat tcpdump shellcheck
+ENTRYPOINT []
