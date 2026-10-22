@@ -62,7 +62,8 @@ docker build -t nanocl-qemu:vm019-test .
 
 The current Alpine 3.18 package build resolves QEMU 8.0.5 and dnsmasq 2.90. The
 candidate nightly tag is `ghcr.io/next-hat/nanocl-qemu:8.0.5.0-nightly`, with the
-`io.nanocl.vm-runtime-api=0.19` label. Registry publication is a separate release
+`io.nanocl.vm-runtime-api=0.19` label. Custom user-data additionally requires
+`io.nanocl.vm-cloud-init-user-data=1`. Registry publication is a separate release
 step. NanoCL requires the label so an old runtime cannot silently ignore the new
 configuration. After publication, CI can explicitly select this nightly image
 for end-to-end testing.
@@ -92,18 +93,22 @@ poweroff stops the runtime instead of pausing QEMU.
 | `NANOCL_NETWORK_MODE` | required | `bridge`, after confirming a dedicated Docker bridge namespace. |
 | `DEFAULT_INTERFACE` | discovered | Must match the sole default-route interface. |
 | `CLOUD_INIT` | `true` | Generate and attach a NoCloud seed for provisioning. |
+| `CLOUD_INIT_USER_DATA` | unset | Complete custom user-data, up to 65536 UTF-8 bytes; replaces generated user/password/SSH configuration, including when empty. |
 | `INSTANCE_ID` | MAC | Stable cloud-init instance identity; NanoCL passes the VM key. |
-| `USER`, `PASSWORD` | `cloud`, `cloud` | Compatibility defaults for cloud-init; change the password or supply an SSH key. |
-| `SSH_KEY` | none | Single authorized public key for the provisioned user. |
-| `DELETE_SSH_KEY` | `true` | cloud-init SSH host-key generation policy. |
+| `USER`, `PASSWORD` | `cloud`, `cloud` | Generated cloud-init defaults when custom user-data is absent; change the password or supply an SSH key. |
+| `SSH_KEY` | none | Single authorized public key for the generated user. Ignored with custom user-data. |
+| `DELETE_SSH_KEY` | `true` | Generated cloud-init SSH host-key generation policy. Ignored with custom user-data. |
 | `DNS` | container resolvers | Optional comma-separated IPv4 upstream DNS servers. Guest DNS remains the private forwarder. |
 | `CONSOLE` | `false` | Enable raw VNC on `/run/nanocl-console/console.sock`. |
 | `GRAPHIC` | `false` | Local GTK/SDL display, requiring `DISPLAY` and operator-provided display mounts. |
 | `GRAPHIC_BACKEND` | `auto` | Local display backend: `auto`, `gtk`, or `sdl`. |
 
 Booleans accept `true`/`false` or `1`/`0`. Console and local graphics are mutually
-exclusive. Provisioning values must be single-line strings and are quoted as
-YAML; passwords and SSH keys are never logged by the runtime.
+exclusive. Generated provisioning values must be single-line strings and are
+quoted as YAML. Custom user-data is copied without interpolation, YAML merging,
+or newline changes. The runtime does not log provisioning content; Docker
+inspect and NanoCL VM inspection expose it to authorized operators, like the
+existing password/SSH fields.
 
 For manual Docker runs, pass `--sysctl net.ipv4.ip_forward=1` and, for **both**
 `all` and `default`, `net.ipv4.conf.<scope>.proxy_arp=1`, `arp_ignore=1`,
@@ -112,8 +117,9 @@ before changing addresses because Docker mounts `/proc/sys` read-only.
 
 ## Optional cloud-init and migration
 
-With `CLOUD_INIT=true`, the seed configures the hostname, user, SSH key/password,
-and IPv4 DHCP matched by the stable MAC, with the interface named `nanocl0`.
+With `CLOUD_INIT=true`, the seed configures IPv4 DHCP matched by the stable MAC,
+with the interface named `nanocl0`. When `CLOUD_INIT_USER_DATA` is unset, it also
+generates the hostname, user and SSH key/password configuration.
 The stable name prevents early netplan generation from waiting for a name that
 udev subsequently changes during boot. DHCPv6, router advertisements, and IPv6
 link-local addresses are disabled to match the runtime's IPv4-only contract.
@@ -121,13 +127,37 @@ It never contains a static guest address or
 hardcoded DNS. The seed uses a stable instance ID and does not run `cloud-init
 clean`: provisioning is not silently repeated on every boot.
 
+Supply a complete cloud-init user-data document to configure additional users,
+packages, files or commands. With the standalone launcher, provide a UTF-8 file
+using `CLOUD_INIT_USER_DATA_FILE`:
+
+```sh
+MAC=52:54:00:00:00:01 CLOUD_INIT_USER_DATA_FILE="$PWD/user-data.yaml" \
+  DISK="$PWD/server.img" ./start_vm.sh
+```
+
+The launcher accepts an empty file, preserves trailing newlines, rejects NUL
+bytes and documents over 65536 bytes, and passes the content through Docker's
+environment without placing it in the command arguments. Supply either the file
+or an exported `CLOUD_INIT_USER_DATA`, not both. For direct Docker runs, export
+the document and pass `-e CLOUD_INIT_USER_DATA`. A cloud-config YAML document
+needs its `#cloud-config` header; scripts and other cloud-init user-data formats
+can also be passed unchanged. NanoCL's stable instance ID and DHCP network
+configuration are retained. Custom data fully owns guest account, password, SSH
+key, hostname and host-key policies: set everything the guest needs, including
+access credentials. The runtime does not validate cloud-init syntax; invalid
+content is reported by cloud-init inside the guest.
+
 With `CLOUD_INIT=false`, no seed is generated or attached. The guest needs its
 own DHCP-capable network configuration; cloud-init need not be installed.
+Custom user-data and generated provisioning values are ignored in this mode.
 Existing images containing static network configuration must be changed to DHCP
 before switching. Existing disks that were provisioned under the old instance
 ID may see a one-time provisioning run after migration; back them up and inspect
-cloud-init state first. User/password/SSH changes are initial provisioning, not
-a general guest configuration-management mechanism.
+cloud-init state first. User/password/SSH and custom user-data changes are initial
+provisioning, not a general guest configuration-management mechanism. Updating
+the data does not force once-per-instance cloud-init modules to run again on an
+already provisioned disk.
 
 Random MAC generation, `FROM_NETWORK`/`TO_NETWORK` renaming, arbitrary `IP`
 overrides, and the old public websockify path are removed. `IP`, when supplied,
@@ -204,7 +234,8 @@ the same temporary directory. Use a writable copy for further tests.
 
 Checks include shell syntax/lint, invalid MAC rejection, actual cloud-init/KVM
 boot, same-IP/mask/MAC, exact gateway/helper route/MTU, guest UDP/TCP DNS and
-outbound HTTP, SSH ingress, explicit
+outbound HTTP, SSH ingress, byte-preserved custom user-data with a custom SSH
+user, `write_files`, `runcmd`, retained instance identity and managed DHCP, explicit
 renewal with no uplink DHCP, two simultaneous VMs and guest-to-guest ingress,
 private Unix VNC protocol, container restart after guest `sync`, DHCP-process
 failure, and cleanup

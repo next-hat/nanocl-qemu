@@ -20,6 +20,14 @@ ipv4_number() {
 yaml_string() { local value=${1//\'/\'\'}; printf "'%s'" "$value"; }
 
 cloud_init=$(boolean CLOUD_INIT "${CLOUD_INIT:-true}")
+# Presence is intentional: an empty document also replaces generated defaults.
+custom_user_data=false
+if [[ $cloud_init == true && ${CLOUD_INIT_USER_DATA+x} ]]; then
+  custom_user_data=true
+  # Environment strings cannot contain NUL. Count bytes, not locale characters.
+  user_data_bytes=$(LC_ALL=C printf '%s' "$CLOUD_INIT_USER_DATA" | wc -c)
+  ((user_data_bytes <= 65536)) || fail 'CLOUD_INIT_USER_DATA must not exceed 65536 bytes'
+fi
 console=$(boolean CONSOLE "${CONSOLE:-false}")
 graphic=$(boolean GRAPHIC "${GRAPHIC:-false}")
 [[ $(boolean WEBSOCKIFY "${WEBSOCKIFY:-false}") == false ]] || fail 'WEBSOCKIFY was removed; use the authorized NanoCL console with CONSOLE=true'
@@ -93,11 +101,16 @@ if [[ -n ${DNS:-} ]]; then
   [[ $DNS != *, ]] || fail 'DNS cannot contain empty entries'
 fi
 if [[ $cloud_init == true ]]; then
-  delete_keys=$(boolean DELETE_SSH_KEY "${DELETE_SSH_KEY:-true}")
-  for value in "${USER:-cloud}" "${PASSWORD:-cloud}" "${SSH_KEY:-}" "${INSTANCE_ID:-$mac}" "$(hostname)"; do
+  for value in "${INSTANCE_ID:-$mac}" "$(hostname)"; do
     [[ $value != *$'\n'* && $value != *$'\r'* ]] || fail 'provisioning values must be single-line strings'
   done
-  [[ ${USER:-cloud} =~ ^[a-z_][a-z0-9_-]*$ ]] || fail 'USER must be a valid Linux account name'
+  if [[ $custom_user_data == false ]]; then
+    delete_keys=$(boolean DELETE_SSH_KEY "${DELETE_SSH_KEY:-true}")
+    for value in "${USER:-cloud}" "${PASSWORD:-cloud}" "${SSH_KEY:-}"; do
+      [[ $value != *$'\n'* && $value != *$'\r'* ]] || fail 'provisioning values must be single-line strings'
+    done
+    [[ ${USER:-cloud} =~ ^[a-z_][a-z0-9_-]*$ ]] || fail 'USER must be a valid Linux account name'
+  fi
 fi
 
 state=/run/nanocl-runtime
@@ -171,16 +184,20 @@ if [[ $console == true ]]; then
 fi
 seed_args=()
 if [[ $cloud_init == true ]]; then
-  user=${USER:-cloud}
-  {
-    printf '#cloud-config\nhostname: '; yaml_string "$(hostname)"
-    printf '\nmanage_etc_hosts: true\nusers:\n  - default\n  - name: '; yaml_string "$user"
-    printf '\n    sudo: "ALL=(ALL) NOPASSWD:ALL"\n    groups: [users, sudo]\n    shell: /bin/bash\n    lock_passwd: false\n'
-    if [[ -n ${SSH_KEY:-} ]]; then printf '    ssh_authorized_keys:\n      - '; yaml_string "$SSH_KEY"; printf '\n'; fi
-    printf 'ssh_pwauth: true\ndisable_root: true\nchpasswd:\n  expire: false\n  users:\n    - name: '; yaml_string "$user"
-    printf '\n      password: '; yaml_string "${PASSWORD:-cloud}"
-    printf '\n      type: text\nssh_deletekeys: %s\n' "$delete_keys"
-  } >"$state/user-data"
+  if [[ $custom_user_data == true ]]; then
+    printf '%s' "$CLOUD_INIT_USER_DATA" >"$state/user-data"
+  else
+    user=${USER:-cloud}
+    {
+      printf '#cloud-config\nhostname: '; yaml_string "$(hostname)"
+      printf '\nmanage_etc_hosts: true\nusers:\n  - default\n  - name: '; yaml_string "$user"
+      printf '\n    sudo: "ALL=(ALL) NOPASSWD:ALL"\n    groups: [users, sudo]\n    shell: /bin/bash\n    lock_passwd: false\n'
+      if [[ -n ${SSH_KEY:-} ]]; then printf '    ssh_authorized_keys:\n      - '; yaml_string "$SSH_KEY"; printf '\n'; fi
+      printf 'ssh_pwauth: true\ndisable_root: true\nchpasswd:\n  expire: false\n  users:\n    - name: '; yaml_string "$user"
+      printf '\n      password: '; yaml_string "${PASSWORD:-cloud}"
+      printf '\n      type: text\nssh_deletekeys: %s\n' "$delete_keys"
+    } >"$state/user-data"
+  fi
   { printf 'instance-id: '; yaml_string "${INSTANCE_ID:-$mac}"; printf '\n'; } >"$state/meta-data"
   cat >"$state/network-config" <<NETWORK
 version: 2

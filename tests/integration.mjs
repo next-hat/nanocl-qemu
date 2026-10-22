@@ -28,17 +28,17 @@ async function until(description, check, timeout = 120000) {
   while (Date.now() < deadline) { if (check()) return; await delay(500); }
   throw new Error(`Timed out: ${description}`);
 }
-function sshArgs(ip, command) {
-  return ['-i', `${work}/key`, '-o', 'IdentitiesOnly=yes', '-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=no', '-o', `UserKnownHostsFile=${work}/known_hosts`, '-o', 'ConnectTimeout=3', `cloud@${ip}`, command];
+function sshArgs(ip, command, user = 'cloud') {
+  return ['-i', `${work}/key`, '-o', 'IdentitiesOnly=yes', '-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=no', '-o', `UserKnownHostsFile=${work}/known_hosts`, '-o', 'ConnectTimeout=3', `${user}@${ip}`, command];
 }
-const ssh = (vm, command) => run('ssh', sshArgs(vm.ip, command));
+const ssh = (vm, command) => run('ssh', sshArgs(vm.ip, command, vm.user));
 async function ready(vm) {
   await until(`SSH ${vm.name}`, () => {
     assert.equal(docker('inspect', '-f', '{{.State.Running}}', vm.name), 'true', `${vm.name} exited; inspect ${work}`);
-    return attempt('ssh', sshArgs(vm.ip, 'true')).status === 0;
+    return attempt('ssh', sshArgs(vm.ip, 'true', vm.user)).status === 0;
   });
 }
-async function launch(id, cloudInit, fixedIp, disk = `${work}/guest${id}.qcow2`) {
+async function launch(id, cloudInit, fixedIp, disk = `${work}/guest${id}.qcow2`, userData) {
   const name = `${prefix}-${id}`;
   const mac = `52:54:00:19:00:0${id}`;
   const consoleDir = `${work}/console${id}`;
@@ -46,14 +46,16 @@ async function launch(id, cloudInit, fixedIp, disk = `${work}/guest${id}.qcow2`)
   const args = ['create', '--name', name, '--network', network, '--cpus', '1.5', '--cap-add', 'NET_ADMIN', '--device', '/dev/kvm', '--device', '/dev/net/tun', '--sysctl', 'net.ipv4.ip_forward=1'];
   for (const scope of ['all', 'default']) for (const [key, value] of Object.entries({ proxy_arp: 1, arp_ignore: 1, send_redirects: 0, rp_filter: 0, accept_local: 1 })) args.push('--sysctl', `net.ipv4.conf.${scope}.${key}=${value}`);
   if (fixedIp) args.push('--ip', fixedIp);
-  for (const env of [`MAC=${mac}`, 'NANOCL_NETWORK_MODE=bridge', `CLOUD_INIT=${cloudInit}`, `CONSOLE=${id === 1}`, `INSTANCE_ID=${name}`, `USER=${cloudInit ? 'cloud' : 'ignored invalid user'}`, `SSH_KEY=${readFileSync(`${work}/key.pub`, 'utf8').trim()}`]) args.push('-e', env);
+  for (const env of [`MAC=${mac}`, 'NANOCL_NETWORK_MODE=bridge', `CLOUD_INIT=${cloudInit}`, `CONSOLE=${id === 1}`, `INSTANCE_ID=${name}`, `USER=${cloudInit && userData === undefined ? 'cloud' : 'ignored invalid user'}`, `SSH_KEY=${readFileSync(`${work}/key.pub`, 'utf8').trim()}`]) args.push('-e', env);
+  if (userData !== undefined) args.push('-e', `CLOUD_INIT_USER_DATA=${userData}`, '-e', 'PASSWORD=ignored\ninvalid', '-e', 'DELETE_SSH_KEY=ignored');
+  if (!cloudInit) args.push('-e', 'CLOUD_INIT_USER_DATA=ignored custom data');
   if (id === 2) args.push('-e', `DNS=${process.env.TEST_DNS ?? '1.1.1.1'}`);
   args.push('-v', `${base}:${base}:ro`, '-v', `${work}:${work}`, '-v', `${consoleDir}:/run/nanocl-console`, image, '-accel', 'kvm', '-m', '768M', '-smp', '1', '-drive', `file=${disk},if=virtio,format=qcow2`);
   docker(...args);
   containers.add(name);
   docker('start', name);
   const ip = docker('inspect', '-f', '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}', name);
-  const vm = { name, ip, mac, consoleDir };
+  const vm = { name, ip, mac, consoleDir, user: userData === undefined ? 'cloud' : 'provisioned' };
   await ready(vm);
   return vm;
 }
@@ -93,6 +95,7 @@ async function renewalAndIsolation(vm, iface) {
 console.log(`Evidence/overlays: ${work}`);
 try {
   assert.equal(docker('image', 'inspect', '-f', '{{index .Config.Labels "io.nanocl.vm-runtime-api"}}', image), '0.19');
+  assert.equal(docker('image', 'inspect', '-f', '{{index .Config.Labels "io.nanocl.vm-cloud-init-user-data"}}', image), '1');
   docker('run', '--rm', '--entrypoint', 'bash', image, '-n', '/entrypoint.sh');
   docker('run', '--rm', '--entrypoint', 'shellcheck', tools, '/entrypoint.sh');
   const invalid = attempt('docker', ['run', '--rm', '--network', 'none', '-e', 'MAC=ff:ff:ff:ff:ff:ff', image]);
@@ -109,9 +112,15 @@ try {
   console.log('PASS cloud-init boot, same Docker IP, /24, stable MAC, guest UDP/TCP DNS, outbound HTTP and SSH ingress');
   await renewalAndIsolation(first, iface);
   console.log('PASS explicit DHCP renewal and no uplink DHCP packets');
-  const second = await launch(2, true);
+  const customData = `#cloud-config\nusers:\n  - name: provisioned\n    sudo: 'ALL=(ALL) NOPASSWD:ALL'\n    shell: /bin/bash\n    ssh_authorized_keys:\n      - ${readFileSync(`${work}/key.pub`, 'utf8').trim()}\nwrite_files:\n  - path: /etc/nanocl-provisioned\n    permissions: '0644'\n    content: |\n      café 'quoted' $literal\nruncmd:\n  - [touch, /etc/nanocl-runcmd]\n\n`;
+  const second = await launch(2, true, undefined, undefined, customData);
   assert.match(ssh(second, 'cloud-init status --wait'), /status: done/);
+  assert.equal(execFileSync('docker', ['exec', second.name, 'cat', '/run/nanocl-runtime/user-data'], { encoding: 'utf8' }), customData);
+  assert.equal(execFileSync('ssh', sshArgs(second.ip, 'sudo cat /var/lib/cloud/instance/user-data.txt', second.user), { encoding: 'utf8' }), customData);
+  assert.equal(ssh(second, 'cat /etc/nanocl-provisioned && test -f /etc/nanocl-runcmd && ! getent passwd cloud'), "café 'quoted' $literal");
+  assert.equal(ssh(second, 'cloud-init query instance_id'), second.name);
   checkNetwork(second);
+  console.log('PASS custom user-data is unchanged in runtime and guest; custom SSH user, write_files/runcmd, stable instance ID and managed DHCP');
   assert.notEqual(first.ip, second.ip);
   ssh(first, `python3 -c 'import socket; s=socket.create_connection(("${second.ip}",22),10); assert s.recv(64).startswith(b"SSH-")'`);
   assert(!docker('exec', second.name, 'ss', '-lnt').match(/:(5900|6080)\b/));

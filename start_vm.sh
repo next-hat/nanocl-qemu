@@ -9,6 +9,31 @@ for scope in all default; do
   done
 done
 args+=(-e "MAC=$MAC" -e NANOCL_NETWORK_MODE=bridge -e "CLOUD_INIT=${CLOUD_INIT:-true}" -e "CONSOLE=${CONSOLE:-false}")
+if [[ ${CLOUD_INIT:-true} == true || ${CLOUD_INIT:-true} == 1 ]]; then
+  if [[ ${CLOUD_INIT_USER_DATA_FILE+x} ]]; then
+    if [[ ${CLOUD_INIT_USER_DATA+x} || ! -f $CLOUD_INIT_USER_DATA_FILE || ! -r $CLOUD_INIT_USER_DATA_FILE ]]; then
+      echo 'CLOUD_INIT_USER_DATA_FILE must be a readable regular file and cannot accompany CLOUD_INIT_USER_DATA' >&2
+      exit 1
+    fi
+    if (($(wc -c <"$CLOUD_INIT_USER_DATA_FILE") > 65536)); then
+      echo 'CLOUD_INIT_USER_DATA_FILE must not exceed 65536 bytes' >&2
+      exit 1
+    fi
+    # EOF preserves trailing newlines; a successful NUL-delimited read rejects NUL.
+    if IFS= read -r -d '' CLOUD_INIT_USER_DATA <"$CLOUD_INIT_USER_DATA_FILE"; then
+      echo 'CLOUD_INIT_USER_DATA_FILE must not contain NUL bytes' >&2
+      exit 1
+    fi
+  fi
+  if [[ ${CLOUD_INIT_USER_DATA+x} ]]; then
+    if (($(LC_ALL=C printf '%s' "$CLOUD_INIT_USER_DATA" | wc -c) > 65536)); then
+      echo 'CLOUD_INIT_USER_DATA must not exceed 65536 bytes' >&2
+      exit 1
+    fi
+    export CLOUD_INIT_USER_DATA
+    args+=(-e CLOUD_INIT_USER_DATA)
+  fi
+fi
 for key in USER PASSWORD SSH_KEY INSTANCE_ID DNS DELETE_SSH_KEY; do
   [[ -z ${!key:-} ]] || args+=(-e "$key=${!key}")
 done

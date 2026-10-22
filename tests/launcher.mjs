@@ -3,7 +3,7 @@
 // Usage: node --test tests/launcher.mjs
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -12,7 +12,7 @@ import { after, test } from 'node:test';
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const work = mkdtempSync(join(tmpdir(), 'nanocl-launcher-test-'));
 after(() => rmSync(work, { recursive: true, force: true }));
-writeFileSync(join(work, 'docker'), '#!/bin/bash\nprintf \'%s\\0\' "$@"\n', { mode: 0o700 });
+writeFileSync(join(work, 'docker'), '#!/bin/bash\nif [[ ${TEST_USER_DATA_OUTPUT:-} ]]; then printf \'%s\' "$CLOUD_INIT_USER_DATA" >"$TEST_USER_DATA_OUTPUT"; fi\nprintf \'%s\\0\' "$@"\n', { mode: 0o700 });
 const env = { PATH: `${work}:/usr/bin:/bin`, MAC: '52:54:00:19:00:01', DISK: '/test/guest.qcow2' };
 const run = (script, values = {}, args = []) => spawnSync('/bin/bash', [join(root, script), ...args], {
   env: { ...env, ...values }, encoding: 'utf8', timeout: 5000,
@@ -31,6 +31,54 @@ test('launcher forwards explicit SSH host-key policy, including false and zero',
     assert.equal(args[index - 1], '-e');
   }
   assert(!dockerArgs({}).some(arg => arg.startsWith('DELETE_SSH_KEY=')), 'unset policy must retain the runtime default');
+});
+
+test('launcher preserves custom user-data file bytes, including empty data and trailing newlines', () => {
+  for (const data of ['', '#cloud-config\n# café \'quoted\' $literal $(untouched)\n\n', 'x'.repeat(65536)]) {
+    const path = join(work, 'user data.yaml');
+    const output = join(work, 'forwarded-user-data');
+    writeFileSync(path, data);
+    const args = dockerArgs({ CLOUD_INIT_USER_DATA_FILE: path, TEST_USER_DATA_OUTPUT: output });
+    assert.equal(readFileSync(output, 'utf8'), data);
+    const index = args.indexOf('CLOUD_INIT_USER_DATA');
+    assert(index > 0);
+    assert.equal(args[index - 1], '-e');
+    assert(!args.some(arg => arg.startsWith('CLOUD_INIT_USER_DATA=')), 'payload must not appear in Docker command arguments');
+  }
+});
+
+test('launcher rejects unreadable, NUL, oversized and ambiguous user-data inputs before Docker', () => {
+  const nul = join(work, 'nul-user-data');
+  const large = join(work, 'large-user-data');
+  writeFileSync(nul, 'before\0after');
+  writeFileSync(large, 'é'.repeat(32769));
+  for (const values of [
+    { CLOUD_INIT_USER_DATA_FILE: join(work, 'absent') },
+    { CLOUD_INIT_USER_DATA_FILE: work },
+    { CLOUD_INIT_USER_DATA_FILE: nul },
+    { CLOUD_INIT_USER_DATA_FILE: large },
+    { CLOUD_INIT_USER_DATA_FILE: nul, CLOUD_INIT_USER_DATA: '' },
+    { CLOUD_INIT_USER_DATA: 'x'.repeat(65537) },
+  ]) {
+    const result = run('start_vm.sh', values);
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /CLOUD_INIT_USER_DATA/);
+    assert.equal(result.stdout, '', 'Docker must not be invoked');
+  }
+  for (const value of ['false', '0']) {
+    const args = dockerArgs({ CLOUD_INIT: value, CLOUD_INIT_USER_DATA_FILE: nul, CLOUD_INIT_USER_DATA: 'x'.repeat(65537) });
+    assert(!args.includes('CLOUD_INIT_USER_DATA'), 'disabled provisioning ignores custom data');
+  }
+});
+
+test('runtime bounds custom user-data by bytes only when cloud-init is enabled', () => {
+  const rejected = run('entrypoint.sh', { CLOUD_INIT_USER_DATA: 'é'.repeat(32769) });
+  assert.notEqual(rejected.status, 0);
+  assert.match(rejected.stderr, /must not exceed 65536 bytes/);
+  for (const values of [{ CLOUD_INIT_USER_DATA: 'x'.repeat(65536) }, { CLOUD_INIT: 'false', CLOUD_INIT_USER_DATA: 'x'.repeat(65537) }]) {
+    const result = run('entrypoint.sh', values);
+    assert.match(result.stderr, /NANOCL_NETWORK_MODE=bridge/, 'accepted data reaches the existing namespace validation');
+  }
 });
 
 test('console enabled launcher binds the supplied private VM directory', () => {

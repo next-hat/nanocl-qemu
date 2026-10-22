@@ -27,6 +27,7 @@ COPY ./entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
 LABEL io.nanocl.vm-runtime-api="0.19"
+LABEL io.nanocl.vm-cloud-init-user-data="1"
 LABEL org.opencontainers.image.source=https://github.com/next-hat/nanocl-qemu
 LABEL org.opencontainers.image.description="Nanocl Qemu Runtime"
 
