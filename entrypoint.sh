@@ -34,7 +34,7 @@ mac=${mac,,}
 # (disks, CPU, memory, acceleration) remain operator-controlled.
 for arg in "$@"; do
   case "$arg" in
-    -nographic|--nographic|-vnc|--vnc|-display|--display|-spice|--spice|-net|--net|-netdev|--netdev|-nic|--nic|-daemonize|--daemonize|-serial|--serial|-monitor|--monitor|-pidfile|--pidfile)
+    -nographic|--nographic|-vnc|--vnc|-display|--display|-spice|--spice|-net|--net|-netdev|--netdev|-nic|--nic|-daemonize|--daemonize|-no-shutdown|--no-shutdown|-action|--action|-serial|--serial|-monitor|--monitor|-pidfile|--pidfile)
       fail "$arg conflicts with runtime-managed networking, display or supervision";;
   esac
  done

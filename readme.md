@@ -61,10 +61,11 @@ docker build -t nanocl-qemu:vm019-test .
 ```
 
 The current Alpine 3.18 package build resolves QEMU 8.0.5 and dnsmasq 2.90. The
-candidate tag is `ghcr.io/next-hat/nanocl-qemu:8.0.5.0`, with the
+candidate nightly tag is `ghcr.io/next-hat/nanocl-qemu:8.0.5.0-nightly`, with the
 `io.nanocl.vm-runtime-api=0.19` label. Registry publication is a separate release
 step. NanoCL requires the label so an old runtime cannot silently ignore the new
-configuration.
+configuration. After publication, CI can explicitly select this nightly image
+for end-to-end testing.
 
 Use an existing disk with a DHCP-capable guest. Keep a separate copy or qcow2
 overlay for each VM; never open one writable disk from multiple QEMU processes.
@@ -79,7 +80,9 @@ The launcher uses Docker's default bridge. Set `NETWORK` to a user-defined bridg
 for Docker service-name resolution. KVM requires `/dev/kvm`; runtime networking
 requires `/dev/net/tun` and `NET_ADMIN`. Privileged containers and host networking
 are unnecessary. The runtime owns network/display/supervision QEMU options;
-disk, memory, CPU and acceleration arguments remain configurable.
+disk, memory, CPU and acceleration arguments remain configurable. In particular,
+`-no-shutdown`, `-action` and their double-dash aliases are rejected so guest
+poweroff stops the runtime instead of pausing QEMU.
 
 ## Configuration
 
@@ -143,6 +146,19 @@ checking the current VM, runtime identity and enabled console. See NanoCL's
 browser usage. QEMU native WebSocket and websockify were rejected because either
 would add a listener and an additional authorization boundary to the runtime.
 
+For the standalone launcher, `CONSOLE=true` (or `1`) requires `CONSOLE_DIR` to
+name an existing absolute directory with mode 0700, dedicated to this VM. The
+path must not be a symlink or contain commas. The launcher bind-mounts it at
+`/run/nanocl-console`; connect an authorized local console bridge to
+`$CONSOLE_DIR/console.sock`. The launcher does not create a shared directory or
+start a network listener. For example, create a new private directory per VM:
+
+```sh
+install -d -m 700 "$PWD/vm-console"
+MAC=52:54:00:00:00:01 CONSOLE=true CONSOLE_DIR="$PWD/vm-console" \
+  DISK="$PWD/server.img" ./start_vm.sh
+```
+
 QEMU and dnsmasq are supervised together. A DHCP/DNS process exit stops the guest;
 a QEMU exit stops dnsmasq. TERM/INT stop and reap both children, with a bounded
 fallback for an unresponsive process. Cleanup removes only owned firewall
@@ -160,6 +176,12 @@ does not claim crash-safe guest application data.
 
 ## Reproducible validation
 
+Run launcher and early runtime argument checks without Docker or KVM:
+
+```sh
+node --test tests/launcher.mjs
+```
+
 On Linux with Docker, KVM, Node.js, OpenSSH and `qemu-img`, supply an immutable
 Ubuntu 24.04 minimal cloud image:
 
@@ -175,7 +197,8 @@ networks. It uses qcow2 overlays in a temporary directory, leaves the source dis
 read-only, and removes its containers/network in `finally`. Logs and overlays
 are retained at the printed temporary path for inspection.
 `guest-no-cloud-init.qcow2` is a flattened snapshot taken after clean shutdown,
-with the cloud-init package removed and ordinary DHCP configuration. This test
+with the cloud-init package removed and ordinary DHCP configuration. The suite
+boots a writable copy of this snapshot for its no-cloud-init checks. This test
 fixture matches MAC `52:54:00:19:00:01`; its `cloud` account uses the test key in
 the same temporary directory. Use a writable copy for further tests.
 

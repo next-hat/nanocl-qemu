@@ -4,7 +4,7 @@
 // RUNTIME_IMAGE and TOOLS_IMAGE select locally built candidates. Never publishes.
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
+import { copyFileSync, mkdtempSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -38,7 +38,7 @@ async function ready(vm) {
     return attempt('ssh', sshArgs(vm.ip, 'true')).status === 0;
   });
 }
-async function launch(id, cloudInit, fixedIp) {
+async function launch(id, cloudInit, fixedIp, disk = `${work}/guest${id}.qcow2`) {
   const name = `${prefix}-${id}`;
   const mac = `52:54:00:19:00:0${id}`;
   const consoleDir = `${work}/console${id}`;
@@ -48,7 +48,7 @@ async function launch(id, cloudInit, fixedIp) {
   if (fixedIp) args.push('--ip', fixedIp);
   for (const env of [`MAC=${mac}`, 'NANOCL_NETWORK_MODE=bridge', `CLOUD_INIT=${cloudInit}`, `CONSOLE=${id === 1}`, `INSTANCE_ID=${name}`, `USER=${cloudInit ? 'cloud' : 'ignored invalid user'}`, `SSH_KEY=${readFileSync(`${work}/key.pub`, 'utf8').trim()}`]) args.push('-e', env);
   if (id === 2) args.push('-e', `DNS=${process.env.TEST_DNS ?? '1.1.1.1'}`);
-  args.push('-v', `${base}:${base}:ro`, '-v', `${work}:${work}`, '-v', `${consoleDir}:/run/nanocl-console`, image, '-accel', 'kvm', '-m', '768M', '-smp', '1', '-drive', `file=${work}/guest${id}.qcow2,if=virtio,format=qcow2`);
+  args.push('-v', `${base}:${base}:ro`, '-v', `${work}:${work}`, '-v', `${consoleDir}:/run/nanocl-console`, image, '-accel', 'kvm', '-m', '768M', '-smp', '1', '-drive', `file=${disk},if=virtio,format=qcow2`);
   docker(...args);
   containers.add(name);
   docker('start', name);
@@ -136,7 +136,9 @@ try {
   docker('rm', first.name);
   containers.delete(first.name);
   run('qemu-img', ['convert', '-O', 'qcow2', `${work}/guest1.qcow2`, `${work}/guest-no-cloud-init.qcow2`]);
-  const plain = await launch(1, false, first.ip);
+  const plainDisk = `${work}/guest-no-cloud-init-boot.qcow2`;
+  copyFileSync(`${work}/guest-no-cloud-init.qcow2`, plainDisk);
+  const plain = await launch(1, false, first.ip, plainDisk);
   ssh(plain, 'test ! -e /usr/bin/cloud-init');
   docker('exec', plain.name, 'sh', '-c', 'test ! -e /run/nanocl-runtime/seed.img; ! tr "\\0" " " </proc/$(pidof qemu-system-x86_64)/cmdline | grep -q -- -cdrom');
   checkNetwork(plain);
