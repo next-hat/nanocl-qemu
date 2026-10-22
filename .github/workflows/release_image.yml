@@ -29,23 +29,23 @@ jobs:
       - name: Publish Nightly
         if: env.CHANNEL == 'nightly'
         run: |
-          gh release download -R nxthat/nanocl-qemu $VERSION-nightly -p nanocl-qemu-$VERSION-nightly.tar.gz
+          gh release download -R next-hat/nanocl-qemu $VERSION-nightly -p nanocl-qemu-$VERSION-nightly.tar.gz
           cat nanocl-qemu-$VERSION-nightly.tar.gz | docker load
-          docker tag ghcr.io/nxthat/nanocl-qemu:$VERSION-nightly ghcr.io/nxthat/nanocl-qemu:nightly
-          docker tag ghcr.io/nxthat/nanocl-qemu:$VERSION-nightly ghcr.io/nxthat/nanocl-qemu:$VERSION-nightly
-          docker push ghcr.io/nxthat/nanocl-qemu:nightly
-          docker push ghcr.io/nxthat/nanocl-qemu:$VERSION-nightly
+          docker tag ghcr.io/next-hat/nanocl-qemu:$VERSION-nightly ghcr.io/next-hat/nanocl-qemu:nightly
+          docker tag ghcr.io/next-hat/nanocl-qemu:$VERSION-nightly ghcr.io/next-hat/nanocl-qemu:$VERSION-nightly
+          docker push ghcr.io/next-hat/nanocl-qemu:nightly
+          docker push ghcr.io/next-hat/nanocl-qemu:$VERSION-nightly
         env:
           GITHUB_TOKEN: ${{ secrets.BOT_TOKEN }}
 
       - name: Publish Stable
         if: env.CHANNEL != 'nightly'
         run: |
-          gh release download -R nxthat/nanocl-qemu $VERSION -p nanocl-qemu-$VERSION.tar.gz
+          gh release download -R next-hat/nanocl-qemu $VERSION -p nanocl-qemu-$VERSION.tar.gz
           cat nanocl-qemu-$VERSION.tar.gz | docker load
-          docker tag ghcr.io/nxthat/nanocl-qemu:$VERSION ghcr.io/nxthat/nanocl-qemu:latest
-          docker tag ghcr.io/nxthat/nanocl-qemu:$VERSION ghcr.io/nxthat/nanocl-qemu:$VERSION
-          docker push ghcr.io/nxthat/nanocl-qemu:latest
-          docker push ghcr.io/nxthat/nanocl-qemu:$VERSION
+          docker tag ghcr.io/next-hat/nanocl-qemu:$VERSION ghcr.io/next-hat/nanocl-qemu:latest
+          docker tag ghcr.io/next-hat/nanocl-qemu:$VERSION ghcr.io/next-hat/nanocl-qemu:$VERSION
+          docker push ghcr.io/next-hat/nanocl-qemu:latest
+          docker push ghcr.io/next-hat/nanocl-qemu:$VERSION
         env:
           GITHUB_TOKEN: ${{ secrets.BOT_TOKEN }}
