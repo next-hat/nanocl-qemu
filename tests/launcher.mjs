@@ -1,0 +1,246 @@
+#!/usr/bin/env node
+// Launcher and early runtime validation regressions; no Docker daemon or KVM.
+// Usage: node --test tests/launcher.mjs
+import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { dirname, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { after, test } from 'node:test';
+
+const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+const work = mkdtempSync(join(tmpdir(), 'nanocl-launcher-test-'));
+after(() => rmSync(work, { recursive: true, force: true }));
+writeFileSync(join(work, 'docker'), '#!/bin/bash\nif [[ $1 == network && $2 == inspect ]]; then if [[ ${TEST_NETWORK_OUTPUT:-} ]]; then printf \'%s\' "${@: -1}" >"$TEST_NETWORK_OUTPUT"; fi; printf \'%064d\\n\' 1; exit 0; fi\nif [[ ${TEST_USER_DATA_OUTPUT:-} ]]; then printf \'%s\' "$CLOUD_INIT_USER_DATA" >"$TEST_USER_DATA_OUTPUT"; fi\nprintf \'%s\\0\' "$@"\n', { mode: 0o700 });
+const vmDirectory = join(work, 'vm');
+mkdirSync(vmDirectory, { mode: 0o700 });
+const env = { PATH: `${work}:/usr/bin:/bin`, MAC: '52:54:00:19:00:01', DISK: '/test/guest.qcow2', VM_DIR: vmDirectory };
+const run = (script, values = {}, args = []) => spawnSync('/bin/bash', [join(root, script), ...args], {
+  env: { ...env, ...values }, encoding: 'utf8', timeout: 5000,
+});
+function dockerArgs(values) {
+  const result = run('start_vm.sh', values);
+  assert.equal(result.status, 0, result.stderr);
+  return result.stdout.split('\0').slice(0, -1);
+}
+
+test('launcher chooses the guest account independently of the host USER', () => {
+  for (const [values, expected] of [
+    [{}, 'cloud'],
+    [{ USER: 'alice' }, 'cloud'],
+    [{ USER: 'alice', GUEST_USER: '' }, 'cloud'],
+    [{ USER: 'alice', GUEST_USER: 'vmadmin' }, 'vmadmin'],
+  ]) {
+    const args = dockerArgs(values);
+    assert.deepEqual(args.filter(arg => arg.startsWith('USER=')), [`USER=${expected}`]);
+    assert.equal(args[args.indexOf(`USER=${expected}`) - 1], '-e');
+  }
+});
+
+test('launcher explicitly configures endpoint sysctls and separates guest and uplink names', () => {
+  const output = join(work, 'network-name');
+  const args = dockerArgs({ NETWORK: 'VM-Network', TEST_NETWORK_OUTPUT: output, FROM_NETWORK: 'guest0', DEFAULT_INTERFACE: 'veth0' });
+  const network = args[args.indexOf('--network') + 1];
+  assert(network.startsWith(`name=${'0'.repeat(63)}1,"driver-opt=com.docker.network.endpoint.sysctls=`));
+  assert.equal(readFileSync(output, 'utf8'), 'VM-Network');
+  for (const setting of ['proxy_arp=1', 'arp_ignore=1', 'send_redirects=0', 'rp_filter=0', 'accept_local=1']) {
+    assert(network.includes(`net.ipv4.conf.IFNAME.${setting}`));
+  }
+  assert(network.endsWith('"'));
+  assert(args.includes('FROM_NETWORK=guest0'));
+  assert(args.includes('DEFAULT_INTERFACE=veth0'));
+});
+
+test('runtime validates the configured guest interface before namespace changes', () => {
+  for (const name of ['guest0', 'ens3', 'custom_name-1', 'a'.repeat(15)]) {
+    assert.match(run('entrypoint.sh', { FROM_NETWORK: name }).stderr, /NANOCL_NETWORK_MODE=bridge/);
+  }
+  for (const name of ['lo', 'a'.repeat(16), 'guest 0', 'guest:0', 'guest\n0']) {
+    assert.match(run('entrypoint.sh', { FROM_NETWORK: name }).stderr, /FROM_NETWORK must be/);
+  }
+});
+
+test('launcher forwards explicit SSH host-key policy, including false and zero', () => {
+  for (const value of ['true', 'false', '1', '0']) {
+    const args = dockerArgs({ DELETE_SSH_KEY: value });
+    const index = args.indexOf(`DELETE_SSH_KEY=${value}`);
+    assert(index > 0);
+    assert.equal(args[index - 1], '-e');
+  }
+  assert(!dockerArgs({}).some(arg => arg.startsWith('DELETE_SSH_KEY=')), 'unset policy must retain the runtime default');
+});
+
+test('launcher preserves custom user-data file bytes, including empty data and trailing newlines', () => {
+  for (const data of ['', '#cloud-config\n# café \'quoted\' $literal $(untouched)\n\n', 'x'.repeat(65536)]) {
+    const path = join(work, 'user data.yaml');
+    const output = join(work, 'forwarded-user-data');
+    writeFileSync(path, data);
+    const args = dockerArgs({ CLOUD_INIT_USER_DATA_FILE: path, TEST_USER_DATA_OUTPUT: output });
+    assert.equal(readFileSync(output, 'utf8'), data);
+    const index = args.indexOf('CLOUD_INIT_USER_DATA');
+    assert(index > 0);
+    assert.equal(args[index - 1], '-e');
+    assert(!args.some(arg => arg.startsWith('CLOUD_INIT_USER_DATA=')), 'payload must not appear in Docker command arguments');
+  }
+});
+
+test('launcher rejects unreadable, NUL, oversized and ambiguous user-data inputs before Docker', () => {
+  const nul = join(work, 'nul-user-data');
+  const large = join(work, 'large-user-data');
+  writeFileSync(nul, 'before\0after');
+  writeFileSync(large, 'é'.repeat(32769));
+  for (const values of [
+    { CLOUD_INIT_USER_DATA_FILE: join(work, 'absent') },
+    { CLOUD_INIT_USER_DATA_FILE: work },
+    { CLOUD_INIT_USER_DATA_FILE: nul },
+    { CLOUD_INIT_USER_DATA_FILE: large },
+    { CLOUD_INIT_USER_DATA_FILE: nul, CLOUD_INIT_USER_DATA: '' },
+    { CLOUD_INIT_USER_DATA: 'x'.repeat(65537) },
+  ]) {
+    const result = run('start_vm.sh', values);
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /CLOUD_INIT_USER_DATA/);
+    assert.equal(result.stdout, '', 'Docker must not be invoked');
+  }
+  for (const value of ['false', '0']) {
+    const args = dockerArgs({ CLOUD_INIT: value, CLOUD_INIT_USER_DATA_FILE: nul, CLOUD_INIT_USER_DATA: 'x'.repeat(65537) });
+    assert(!args.includes('CLOUD_INIT_USER_DATA'), 'disabled provisioning ignores custom data');
+  }
+});
+
+test('runtime bounds custom user-data by bytes only when cloud-init is enabled', () => {
+  const rejected = run('entrypoint.sh', { CLOUD_INIT_USER_DATA: 'é'.repeat(32769) });
+  assert.notEqual(rejected.status, 0);
+  assert.match(rejected.stderr, /must not exceed 65536 bytes/);
+  for (const values of [{ CLOUD_INIT_USER_DATA: 'x'.repeat(65536) }, { CLOUD_INIT: 'false', CLOUD_INIT_USER_DATA: 'x'.repeat(65537) }]) {
+    const result = run('entrypoint.sh', values);
+    assert.match(result.stderr, /NANOCL_NETWORK_MODE=bridge/, 'accepted data reaches the existing namespace validation');
+  }
+});
+
+test('launcher always binds the private VM directory, including without a console', () => {
+  const directory = join(work, 'private vm');
+  mkdirSync(directory, { mode: 0o700 });
+  for (const value of ['true', '1', 'false', '0']) {
+    const args = dockerArgs({ CONSOLE: value, VM_DIR: directory });
+    const index = args.indexOf('--mount');
+    assert(index > 0);
+    assert.equal(args[index + 1], `type=bind,source=${directory},target=/run/nanocl-vm`);
+    assert.equal(args.filter(arg => arg === '--mount').length, 1);
+  }
+});
+
+test('launcher refuses absent, non-private, relative and symlink VM directories before Docker', () => {
+  const shared = join(work, 'shared');
+  mkdirSync(shared);
+  chmodSync(shared, 0o755);
+  const privateTarget = join(work, 'private-target');
+  mkdirSync(privateTarget, { mode: 0o700 });
+  const link = join(work, 'linked');
+  symlinkSync(privateTarget, link);
+  for (const directory of [undefined, join(work, 'missing'), 'relative', shared, link, '/tmp/vm,other']) {
+    const result = run('start_vm.sh', { VM_DIR: directory });
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /VM_DIR/);
+    assert.equal(result.stdout, '', 'Docker must not be invoked');
+  }
+});
+
+test('runtime rejects shutdown and monitor overrides before touching its namespace', () => {
+  for (const args of [
+    ['-no-shutdown'], ['--no-shutdown'], ['-action', 'shutdown=pause'], ['--action', 'shutdown=pause'],
+    ['-qmp', 'tcp:0.0.0.0:4444,server=on'], ['--qmp', 'stdio'],
+    ['-qmp-pretty', 'stdio'], ['--qmp-pretty', 'stdio'],
+    ['-mon', 'chardev=other'], ['--mon', 'chardev=other'],
+    ['-monitor', 'stdio'], ['--monitor', 'stdio'],
+    ['-readconfig', '/tmp/other.cfg'], ['--readconfig', '/tmp/other.cfg'],
+  ]) {
+    const result = run('entrypoint.sh', {}, args);
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /conflicts with runtime-managed networking, display, monitor or supervision/);
+    assert(result.stderr.includes(args[0]));
+  }
+  const allowed = run('entrypoint.sh', {}, ['-m', '768M', '-smp', '1']);
+  assert.notEqual(allowed.status, 0);
+  assert.match(allowed.stderr, /NANOCL_NETWORK_MODE=bridge/);
+});
+
+test('managed resources reject raw CPU, memory and machine overrides; standalone retains them', () => {
+  for (const option of ['smp', 'm', 'machine', 'M', 'device', 'object', 'numa', 'global']) for (const flag of [`-${option}`, `--${option}`, `-${option}=1`, `--${option}=1`]) {
+    const rejected = run('entrypoint.sh', { NANOCL_MANAGED_RESOURCES: 'true' }, [flag, '1']);
+    assert.notEqual(rejected.status, 0);
+    assert.match(rejected.stderr, /conflicts with NanoCL-managed resources/);
+    const allowed = run('entrypoint.sh', {}, [flag, '1']);
+    assert.match(allowed.stderr, /NANOCL_NETWORK_MODE=bridge/);
+  }
+});
+
+test('launcher forwards managed resource mode and omits conflicting default allocations', () => {
+  for (const value of ['true', '1', 'false', '0']) {
+    const args = dockerArgs({ NANOCL_MANAGED_RESOURCES: value });
+    assert(args.includes(`NANOCL_MANAGED_RESOURCES=${value}`));
+    assert.equal(args.includes('-m'), value === 'false' || value === '0');
+    assert.equal(args.includes('-smp'), value === 'false' || value === '0');
+  }
+});
+
+function resourceArgs(path) {
+  return spawnSync('/bin/bash', ['-c', 'set -eu; fail() { echo "$*" >&2; exit 1; }; source "$1"; load_managed_resources "$2"; printf "%s\\0" "${qemu_resources[@]}"', 'test', join(root, 'resources.sh'), path], {
+    encoding: 'utf8', timeout: 5000,
+  });
+}
+const resourcesPath = join(vmDirectory, 'resources.json');
+const allocation = { Cpu: 1, Memory: 768, MaxCpu: 4, MaxMemory: 1024 };
+function writeResources(data) { writeFileSync(resourcesPath, typeof data === 'string' ? data : JSON.stringify(data), { mode: 0o600 }); }
+
+test('managed resources supply hotplug topology and reread changed allocations on restart', () => {
+  for (const [data, smp, memory] of [
+    [allocation, 'cpus=1,maxcpus=4,sockets=1,cores=4,threads=1', '768M,slots=32,maxmem=1024M'],
+    [{ ...allocation, Cpu: 2, Memory: 1024 }, 'cpus=2,maxcpus=4,sockets=1,cores=4,threads=1', '1024M'],
+    [{ Cpu: 255, MaxCpu: 255, Memory: 1, MaxMemory: 8796093022207 }, 'cpus=255,maxcpus=255,sockets=1,cores=255,threads=1', '1M,slots=32,maxmem=8796093022207M'],
+  ]) {
+    writeResources(data);
+    const result = resourceArgs(resourcesPath);
+    assert.equal(result.status, 0, result.stderr);
+    assert.deepEqual(result.stdout.split('\0').slice(0, -1), ['-smp', smp, '-m', memory]);
+    assert.equal(readFileSync(resourcesPath, 'utf8'), JSON.stringify(data), 'runtime must retain the durable resource file');
+  }
+});
+
+test('managed resource schema rejects ambiguous, invalid and oversized documents', () => {
+  for (const data of [
+    {}, { ...allocation, Other: 1 }, { ...allocation, Cpu: '1' }, { ...allocation, Cpu: 0 },
+    { ...allocation, Cpu: 5 }, { ...allocation, MaxCpu: 256 }, { ...allocation, Memory: 0 },
+    { ...allocation, Memory: -1 }, { ...allocation, Memory: 1.5 }, { ...allocation, Memory: 1025 },
+    { ...allocation, MaxMemory: 8796093022208 }, [allocation], 'null', '{} {}',
+    '{"Cpu":1,"Cpu":2,"Memory":768,"MaxCpu":4,"MaxMemory":1024}',
+    `${JSON.stringify(allocation)}\0`, `${JSON.stringify(allocation)}${' '.repeat(4096)}`,
+  ]) {
+    writeResources(data);
+    const result = resourceArgs(resourcesPath);
+    assert.notEqual(result.status, 0, JSON.stringify(data));
+    assert.match(result.stderr, /resources.json/);
+    assert.equal(result.stdout, '');
+  }
+  writeResources(`${JSON.stringify(allocation)}${' '.repeat(4096 - JSON.stringify(allocation).length)}`);
+  assert.equal(resourceArgs(resourcesPath).status, 0, '4096 bytes is accepted');
+});
+
+test('managed resource input refuses symlinks, non-regular files and non-private permissions', () => {
+  writeResources(allocation);
+  chmodSync(resourcesPath, 0o644);
+  assert.match(resourceArgs(resourcesPath).stderr, /0600/);
+  chmodSync(resourcesPath, 0o600);
+  const linked = join(vmDirectory, 'linked.json');
+  symlinkSync(resourcesPath, linked);
+  for (const path of [linked, vmDirectory, join(vmDirectory, 'absent')]) {
+    assert.notEqual(resourceArgs(path).status, 0);
+  }
+  chmodSync(vmDirectory, 0o755);
+  assert.match(resourceArgs(resourcesPath).stderr, /0700/);
+  chmodSync(vmDirectory, 0o700);
+  const linkedDirectory = join(work, 'linked-vm');
+  symlinkSync(vmDirectory, linkedDirectory);
+  assert.match(resourceArgs(join(linkedDirectory, 'resources.json')).stderr, /non-symlink directory/);
+});

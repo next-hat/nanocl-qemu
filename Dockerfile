@@ -12,12 +12,12 @@ RUN apk update \
         fontconfig \
         ttf-dejavu \
         iproute2 \
+        iptables \
+        dnsmasq \
         bash \
-        python3 \
-        py3-pip \
+        jq \
         cloud-utils \
         cdrkit \
-        && pip3 install --break-system-packages --no-cache-dir websockify \
         && rm -rf /var/cache/apk/* \
         && rm -rf /tmp/*
 
@@ -25,10 +25,13 @@ COPY ./cloud-localds /usr/bin/cloud-localds
 RUN chmod +x /usr/bin/cloud-localds
 
 COPY ./entrypoint.sh /entrypoint.sh
+COPY ./resources.sh /usr/lib/nanocl-qemu/resources.sh
 RUN chmod +x /entrypoint.sh
 
-EXPOSE 5930 6080
-
+LABEL io.nanocl.vm-runtime-api="0.19"
+LABEL io.nanocl.vm-cloud-init-user-data="1"
+LABEL io.nanocl.vm-qmp="1"
+LABEL io.nanocl.vm-resize="1"
 LABEL org.opencontainers.image.source=https://github.com/next-hat/nanocl-qemu
 LABEL org.opencontainers.image.description="Nanocl Qemu Runtime"
 
